@@ -1,0 +1,4 @@
+Package: skia-safe 0.153.3
+Declared license: MIT
+Sources:
+https://raw.githubusercontent.com/rust-skia/rust-skia/b7f043e0b1e2a850e702245de811f01df1f6b0ff/LICENSE

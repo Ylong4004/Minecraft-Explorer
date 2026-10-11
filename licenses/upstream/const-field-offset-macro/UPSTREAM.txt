@@ -1,0 +1,19 @@
+Package: const-field-offset-macro 0.2.1
+Declared license: MIT OR Apache-2.0
+Sources:
+https://raw.githubusercontent.com/slint-ui/slint/b0fc6a7287a062fefb30133e6aecf0303f76357d/LICENSE.md
+https://raw.githubusercontent.com/slint-ui/slint/b0fc6a7287a062fefb30133e6aecf0303f76357d/LICENSES/Apache-2.0.txt
+https://raw.githubusercontent.com/slint-ui/slint/b0fc6a7287a062fefb30133e6aecf0303f76357d/LICENSES/CC-BY-2.0.txt
+https://raw.githubusercontent.com/slint-ui/slint/b0fc6a7287a062fefb30133e6aecf0303f76357d/LICENSES/CC-BY-4.0.txt
+https://raw.githubusercontent.com/slint-ui/slint/b0fc6a7287a062fefb30133e6aecf0303f76357d/LICENSES/CC-BY-ND-4.0.txt
+https://raw.githubusercontent.com/slint-ui/slint/b0fc6a7287a062fefb30133e6aecf0303f76357d/LICENSES/CC-BY-SA-3.0.txt
+https://raw.githubusercontent.com/slint-ui/slint/b0fc6a7287a062fefb30133e6aecf0303f76357d/LICENSES/CC-BY-SA-4.0.txt
+https://raw.githubusercontent.com/slint-ui/slint/b0fc6a7287a062fefb30133e6aecf0303f76357d/LICENSES/CC-PDDC.txt
+https://raw.githubusercontent.com/slint-ui/slint/b0fc6a7287a062fefb30133e6aecf0303f76357d/LICENSES/GPL-3.0-only.txt
+https://raw.githubusercontent.com/slint-ui/slint/b0fc6a7287a062fefb30133e6aecf0303f76357d/LICENSES/LicenseRef-Slint-Royalty-free-2.0.md
+https://raw.githubusercontent.com/slint-ui/slint/b0fc6a7287a062fefb30133e6aecf0303f76357d/LICENSES/LicenseRef-Slint-Software-3.0.md
+https://raw.githubusercontent.com/slint-ui/slint/b0fc6a7287a062fefb30133e6aecf0303f76357d/LICENSES/LicenseRef-qskinny.txt
+https://raw.githubusercontent.com/slint-ui/slint/b0fc6a7287a062fefb30133e6aecf0303f76357d/LICENSES/MIT.txt
+https://raw.githubusercontent.com/slint-ui/slint/b0fc6a7287a062fefb30133e6aecf0303f76357d/LICENSES/OFL-1.1-RFN.txt
+https://raw.githubusercontent.com/slint-ui/slint/b0fc6a7287a062fefb30133e6aecf0303f76357d/LICENSES/OFL-1.1.txt
+https://raw.githubusercontent.com/slint-ui/slint/b0fc6a7287a062fefb30133e6aecf0303f76357d/LICENSES/Unlicense.txt

@@ -1,0 +1,4 @@
+Package: clipboard-win 5.4.1
+Declared license: BSL-1.0
+Sources:
+https://raw.githubusercontent.com/DoumanAsh/clipboard-win/3b27cf2bfd1adcfa6e0264eb51c1025ddaf0f342/LICENSE

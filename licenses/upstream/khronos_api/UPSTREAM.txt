@@ -1,0 +1,4 @@
+Package: khronos_api 3.1.0
+Declared license: Apache-2.0
+Sources:
+https://raw.githubusercontent.com/brendanzab/gl-rs/f150967b1c44ae888e6676f93f639ebc82771bdc/LICENSE

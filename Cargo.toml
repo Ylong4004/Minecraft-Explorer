@@ -1,0 +1,46 @@
+[package]
+name = "minecraft-explorer"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.92"
+default-run = "minecraft-explorer"
+description = "Minecraft Java 本地存档与实例索引"
+license = "MIT"
+
+[features]
+ui-smoke = []
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.38", features = ["bundled"] }
+fastnbt = "2"
+flate2 = "1"
+chrono = "0.4"
+slint = { version = "=1.18.1", default-features = false, features = ["std", "backend-winit", "renderer-software", "compat-1-2"] }
+rfd = { version = "0.17", default-features = false }
+arboard = { version = "3", default-features = false }
+image = { version = "0.25", default-features = false, features = ["png"] }
+zip = { version = "8", default-features = false, features = ["deflate"] }
+toml = "1.1"
+notify = "8"
+blake3 = "1"
+
+[build-dependencies]
+slint-build = "=1.18.1"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_System_Com", "Win32_Foundation", "Win32_Storage_FileSystem"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+strip = true
+codegen-units = 1
+
+[[bin]]
+name = "minecraft-explorer"
+path = "src/main.rs"

@@ -1,0 +1,4 @@
+Package: spirv 0.4.0+sdk-1.4.341.0
+Declared license: Apache-2.0
+Sources:
+https://raw.githubusercontent.com/gfx-rs/rspirv/8afc3d0ac8e158128cd1410bb2e4b4c26ab11bb4/LICENSE

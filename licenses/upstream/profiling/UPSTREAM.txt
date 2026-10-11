@@ -1,0 +1,5 @@
+Package: profiling 1.0.18
+Declared license: MIT OR Apache-2.0
+Sources:
+https://raw.githubusercontent.com/aclysma/profiling/8271551172eb6fa4cba47369aedd93790c623df9/LICENSE-APACHE
+https://raw.githubusercontent.com/aclysma/profiling/8271551172eb6fa4cba47369aedd93790c623df9/LICENSE-MIT

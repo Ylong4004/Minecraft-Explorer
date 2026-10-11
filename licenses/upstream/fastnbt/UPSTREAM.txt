@@ -1,0 +1,4 @@
+Package: fastnbt 2.6.3
+Declared license: MIT OR Apache-2.0
+Sources:
+https://raw.githubusercontent.com/owengage/fastnbt/d71c04b2e73d1365c0d677e1f42cf573ccc2b281/LICENSE

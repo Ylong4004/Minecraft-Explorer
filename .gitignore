@@ -1,0 +1,7 @@
+/.tools/
+/target/
+/dist/
+/.test-artifacts/
+*.db
+*.db-shm
+*.db-wal
