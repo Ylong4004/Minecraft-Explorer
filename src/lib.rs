@@ -1,10 +1,16 @@
 pub mod content;
 pub mod discovery;
 pub mod duplicates;
+pub mod i18n;
 pub mod index;
 pub mod launcher;
+pub mod licenses;
 pub mod minecraft;
 pub mod models;
+pub mod operations;
 pub mod platform;
+pub mod recycle;
 pub mod scanner;
+pub mod space;
+pub mod walk;
 pub mod watch;

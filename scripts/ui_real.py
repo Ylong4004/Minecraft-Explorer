@@ -1,6 +1,6 @@
-"""Read-only real-game UI verification; application data stays in the workspace.
+"""真实游戏目录的只读界面验收；程序数据留在项目工作区。
 
-Uses a COPY of inspect's cache. Does not open PCL2 or start Minecraft.
+使用只读扫描缓存的副本，不打开 PCL2 或启动 Minecraft。
 """
 import json
 import os

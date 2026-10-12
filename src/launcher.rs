@@ -2,7 +2,7 @@ use crate::{models::*, platform::*};
 use anyhow::{Context, Result, bail};
 use std::{
     path::{Path, PathBuf},
-    process::{Child, Command},
+    process::{Child, Command, ExitStatus},
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -143,17 +143,129 @@ pub fn adapter(kind: &LauncherKind) -> Box<dyn LauncherAdapter> {
     }
 }
 
-pub fn spawn(plan: &ProcessPlan) -> Result<Child> {
+pub enum LauncherProcess {
+    Direct(Child),
+    #[cfg(windows)]
+    Shell(std::os::windows::io::OwnedHandle),
+}
+
+impl LauncherProcess {
+    pub fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
+        match self {
+            Self::Direct(child) => child.try_wait(),
+            #[cfg(windows)]
+            Self::Shell(handle) => {
+                use std::os::windows::{io::AsRawHandle, process::ExitStatusExt};
+                use windows_sys::Win32::System::Threading::{
+                    GetExitCodeProcess, WaitForSingleObject,
+                };
+                let handle = handle.as_raw_handle();
+                match unsafe { WaitForSingleObject(handle, 0) } {
+                    258 => Ok(None),
+                    0 => {
+                        let mut code = 0;
+                        if unsafe { GetExitCodeProcess(handle, &mut code) } == 0 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        Ok(Some(ExitStatus::from_raw(code)))
+                    }
+                    _ => Err(std::io::Error::last_os_error()),
+                }
+            }
+        }
+    }
+    pub fn wait(&mut self) -> std::io::Result<ExitStatus> {
+        loop {
+            if let Some(status) = self.try_wait()? {
+                return Ok(status);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+}
+
+#[cfg(windows)]
+fn spawn_elevated(plan: &ProcessPlan) -> Result<LauncherProcess> {
+    if !plan.args.is_empty() || extension(&plan.program) != "exe" {
+        bail!("启动程序需要管理员权限，请检查 Java 或启动器的兼容性设置");
+    }
+    shell_open(plan)
+}
+
+#[cfg(windows)]
+fn shell_open(plan: &ProcessPlan) -> Result<LauncherProcess> {
+    use std::{
+        os::windows::{ffi::OsStrExt, io::FromRawHandle},
+        ptr,
+    };
+    use windows_sys::Win32::{
+        System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize},
+        UI::Shell::{
+            SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
+            ShellExecuteExW,
+        },
+    };
+    // 由系统处理明确选择的文件，不拼接批处理命令或读取账号参数。
+    let wide = |value: &str| {
+        std::ffi::OsStr::new(value)
+            .encode_wide()
+            .chain(Some(0))
+            .collect::<Vec<_>>()
+    };
+    let program = wide(&display_path(&plan.program));
+    let directory = wide(&display_path(&plan.working_dir));
+    let verb = wide("open");
+    let initialized = unsafe { CoInitializeEx(ptr::null(), COINIT_APARTMENTTHREADED as u32) };
+    let mut info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
+    info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
+    info.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI;
+    info.lpVerb = verb.as_ptr();
+    info.lpFile = program.as_ptr();
+    info.lpDirectory = directory.as_ptr();
+    info.nShow = if matches!(extension(&plan.program).as_str(), "bat" | "cmd") {
+        0
+    } else {
+        1
+    };
+    let success = unsafe { ShellExecuteExW(&mut info) };
+    let error = if success == 0 {
+        Some(std::io::Error::last_os_error())
+    } else {
+        None
+    };
+    if initialized >= 0 {
+        unsafe { CoUninitialize() };
+    }
+    if let Some(error) = error {
+        if error.raw_os_error() == Some(1223) {
+            bail!("已取消 Windows 管理员授权，启动器未打开");
+        }
+        return Err(error).context("Windows 无法打开需要管理员权限的启动器");
+    }
+    if info.hProcess.is_null() {
+        bail!("Windows 没有返回启动器进程句柄，请检查已打开的启动器窗口");
+    }
+    Ok(LauncherProcess::Shell(unsafe {
+        std::os::windows::io::OwnedHandle::from_raw_handle(info.hProcess)
+    }))
+}
+
+pub fn spawn(plan: &ProcessPlan) -> Result<LauncherProcess> {
     let mut command = Command::new(&plan.program);
     command.args(&plan.args).current_dir(&plan.working_dir);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        command.creation_flags(0x08000000); // CREATE_NO_WINDOW for Java console wrappers.
+        command.creation_flags(0x08000000); // 隐藏 Java 包装程序的控制台窗口。
     }
-    command
-        .spawn()
-        .with_context(|| format!("无法打开启动器：{}", display_path(&plan.program)))
+    match command.spawn() {
+        Ok(child) => Ok(LauncherProcess::Direct(child)),
+        #[cfg(windows)]
+        Err(error) if error.raw_os_error() == Some(740) => spawn_elevated(plan),
+        Err(error) => {
+            Err(error).with_context(|| format!("无法打开启动器：{}", display_path(&plan.program)))
+        }
+    }
 }
 
 pub fn validate_mapping(
@@ -219,12 +331,50 @@ pub fn create_mapping(
             .context("版本 JSON 缺少 id，不能猜测")?,
         version_path: version.path.clone(),
         source: "用户手动关联".into(),
+        script: None,
     };
     validate_mapping(&mapping, installation, version)?;
     Ok(mapping)
 }
 
-/// Deliberately gates all launch requests: no externally callable interface has passed real tests.
+pub fn validate_script(script: &LaunchScript) -> Result<()> {
+    let path = checked_path(&script.path)?;
+    if !path.is_file() || !matches!(extension(&path).as_str(), "bat" | "cmd") {
+        bail!("请选择该版本导出的 BAT 或 CMD 启动脚本");
+    }
+    if !checked_path(&script.working_dir)?.is_dir() {
+        bail!("启动脚本工作目录不可用");
+    }
+    Ok(())
+}
+
+/// 脚本是用户明确关联的启动入口；不代表启动器提供指定实例 CLI。
+pub fn spawn_script(
+    installation: &LauncherInstallation,
+    mapping: &LaunchMapping,
+    version: &Item,
+) -> Result<LauncherProcess> {
+    validate_mapping(mapping, installation, version)?;
+    let script = mapping
+        .script
+        .as_ref()
+        .context("请先在设置关联中绑定该版本的启动脚本")?;
+    validate_script(script)?;
+    #[cfg(windows)]
+    {
+        shell_open(&ProcessPlan {
+            program: script.path.clone(),
+            args: vec![],
+            working_dir: script.working_dir.clone(),
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        bail!("BAT / CMD 启动脚本仅支持 Windows")
+    }
+}
+
+/// 保留直接启动门禁：外部实例启动接口尚未通过真实验收。
 pub fn launch_instance(
     installation: &LauncherInstallation,
     mapping: &LaunchMapping,

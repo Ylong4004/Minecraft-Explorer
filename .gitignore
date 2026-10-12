@@ -1,7 +1,10 @@
 /.tools/
 /target/
 /dist/
+/docs/
 /.test-artifacts/
 *.db
 *.db-shm
 *.db-wal
+__pycache__/
+*.pyc

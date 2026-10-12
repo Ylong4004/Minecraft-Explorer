@@ -4,6 +4,10 @@ mod app;
 mod ui_smoke;
 #[cfg(feature = "ui-smoke")]
 mod ui_stage2_smoke;
+#[cfg(feature = "ui-smoke")]
+mod ui_stage3_smoke;
+#[cfg(feature = "ui-smoke")]
+mod ui_stage4_smoke;
 slint::include_modules!();
 
 fn main() {

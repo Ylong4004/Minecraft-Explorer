@@ -1,6 +1,6 @@
-"""Fill license files omitted by crates, from their published VCS commit only.
+"""仅从已发布依赖对应的版本控制提交补齐缺失许可文件。
 
-Run explicitly when preparing a new Cargo.lock; package.ps1 uses local preserved files.
+更新 Cargo.lock 时显式运行；打包脚本使用本地保存的原文。
 """
 import concurrent.futures
 import json

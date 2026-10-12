@@ -124,6 +124,12 @@ pub struct LauncherInstallation {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LaunchScript {
+    pub path: PathBuf,
+    pub working_dir: PathBuf,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LaunchMapping {
     pub subject_id: String,
     pub launcher_id: String,
@@ -132,6 +138,8 @@ pub struct LaunchMapping {
     pub version_id: String,
     pub version_path: PathBuf,
     pub source: String,
+    #[serde(default)]
+    pub script: Option<LaunchScript>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -144,6 +152,10 @@ pub struct Settings {
     pub instance_defaults: std::collections::HashMap<String, String>,
     #[serde(default = "default_watch")]
     pub watch_enabled: bool,
+    #[serde(default)]
+    pub english: bool,
+    #[serde(default)]
+    pub light_theme: bool,
 }
 
 fn default_watch() -> bool {
@@ -159,6 +171,8 @@ impl Default for Settings {
             default_launcher: None,
             instance_defaults: Default::default(),
             watch_enabled: true,
+            english: false,
+            light_theme: false,
         }
     }
 }
@@ -208,7 +222,7 @@ pub fn now_ms() -> i64 {
 
 pub fn bytes_label(value: Option<u64>, complete: bool) -> String {
     let Some(bytes) = value else {
-        return "计算中".into();
+        return "待统计".into();
     };
     let units = ["B", "KiB", "MiB", "GiB", "TiB"];
     let mut number = bytes as f64;

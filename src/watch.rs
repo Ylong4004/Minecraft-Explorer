@@ -1,4 +1,4 @@
-//! Native file notifications only. No polling of file bytes and no writes to game data.
+//! 仅使用原生文件通知，不轮询文件字节、不写入游戏数据。
 use crate::platform::{checked_path, path_key};
 use anyhow::Result;
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
@@ -20,8 +20,8 @@ const MAX_PENDING_PATHS: usize = 8_192;
 #[derive(Clone, Debug, Default)]
 pub struct WatchBatch {
     pub paths: Vec<PathBuf>,
-    /// Native queue overflow, watcher error, or our bounded queue dropped an event.
-    /// Caller must refresh discovery rather than assume the paths are complete.
+    /// 原生队列溢出、监控错误或有界队列丢弃事件。
+    /// 调用方必须重新发现目录，不能假设事件路径完整。
     pub overflow: bool,
 }
 
@@ -61,9 +61,9 @@ impl Monitor {
         })
     }
 
-    /// Replace all watches. Include configured roots/custom paths and discovered external
-    /// game directories; nested directories already covered by a root are deduplicated.
-    /// Invalid/reparse paths are reported individually without disabling other roots.
+    /// 替换全部监控订阅，包含已配置的根或自定义目录及发现的外部
+    /// 游戏目录；已被根目录覆盖的嵌套目录去重。
+    /// 分别报告无效或重解析路径，不影响其他根目录。
     pub fn reconfigure(&mut self, paths: &[PathBuf]) -> Result<Vec<String>> {
         let previously_retrying = self.retry_needed;
         let mut warnings = Vec::new();
@@ -85,7 +85,7 @@ impl Monitor {
         }
         self.retry_needed = !warnings.is_empty();
         if roots == self.roots && !self.subscriptions_stale {
-            // A routine retry/settings save must not discard already queued changes.
+            // 常规重试或保存设置不能丢弃已排队的变化事件。
             return Ok(warnings);
         }
         let replacing_active = !self.roots.is_empty() || previously_retrying;
@@ -97,7 +97,7 @@ impl Monitor {
                 Err(error) => warnings.push(format!("无法监控 {}：{error}", root.display())),
             }
         }
-        self.watcher = watcher; // Drop closes the previous native subscriptions.
+        self.watcher = watcher; // 释放时关闭旧的原生订阅。
         self.receiver = receiver;
         self.dropped = dropped;
         self.roots = watched;
@@ -107,7 +107,7 @@ impl Monitor {
             .filter_map(|root| root_token(root).map(|token| (path_key(root), token)))
             .collect();
         self.pending.clear();
-        // Subscription replacement cannot atomically transfer the old event queue.
+        // 替换订阅无法原子转移旧事件队列。
         self.overflow = replacing_active && !self.roots.is_empty();
         self.first_event = None;
         self.last_event = None;
@@ -124,17 +124,17 @@ impl Monitor {
         &self.roots
     }
 
-    /// Retry desired paths at a low frequency when an offline root becomes available.
+    /// 低频重试目标路径，在离线根目录重新上线后恢复订阅。
     pub fn needs_retry(&self) -> bool {
         self.retry_needed
     }
 
-    /// Nonblocking drain with a bounded per-call budget. A quiet period coalesces writes;
-    /// a three-second maximum latency also flushes while the game is continuously writing.
+    /// 非阻塞排空队列，每次有预算；用静默期合并写事件，
+    /// 游戏持续写入时也在最长三秒后刷新。
     pub fn poll(&mut self) -> Option<WatchBatch> {
         let now = Instant::now();
-        // A native subscription can remain attached to an old directory object after its
-        // pathname is removed/recreated. Probe only root identities, never the file tree.
+        // 目录路径删除重建后，原生订阅可能仍附着在旧目录对象上；
+        // 只检查根目录身份，不探测整个文件树。
         if !self.retry_needed && now.duration_since(self.root_probe_at) >= Duration::from_secs(5) {
             self.root_probe_at = now;
             if self
@@ -187,8 +187,8 @@ impl Monitor {
                     self.subscriptions_stale = true;
                     self.overflow = true;
                 }
-                // Deleted paths cannot be canonicalized, so validate their nearest existing
-                // ancestor. This also rejects events under newly inserted junctions/links.
+                // 已删除路径无法规范化，因此验证最近的现存
+                // 祖先路径，同时拒绝新加入的目录联接或链接下的事件。
                 if !safe_event_path(&path) {
                     continue;
                 }
@@ -281,7 +281,7 @@ fn root_token(path: &Path) -> Option<u128> {
             .open(&checked)
             .ok()?;
         let mut info = BY_HANDLE_FILE_INFORMATION::default();
-        // The directory handle stays alive for the native query and is then closed by Drop.
+        // 目录句柄在原生查询期间保持有效，之后自动关闭。
         if unsafe { GetFileInformationByHandle(directory.as_raw_handle(), &mut info) } == 0 {
             return None;
         }

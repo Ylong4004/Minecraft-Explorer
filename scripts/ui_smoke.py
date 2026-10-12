@@ -1,7 +1,7 @@
-"""Windows smoke test using only a generated fixture and this program's own HWND.
+"""Windows 冒烟测试，只使用生成数据和本程序的窗口句柄。
 
-Requires Python, Pillow and psutil. No user Minecraft data is used.
-The generated screenshots and metrics stay under .test-artifacts.
+需要 Python、Pillow 和 psutil，不使用真实游戏数据。
+截图和性能指标保存在 .test-artifacts 中。
 """
 import ctypes
 from ctypes import wintypes as w
@@ -117,7 +117,7 @@ def click(hwnd, x, y):
     position = w.POINT(round(x*dpi), round(y*dpi))
     user32.ClientToScreen(hwnd, ctypes.byref(position))
     user32.SetCursorPos(position.x, position.y)
-    # Let the native event loop consume WM_MOUSEMOVE before button events.
+    # 让原生事件循环先处理鼠标移动，再处理按键事件。
     time.sleep(.18)
     actual = w.POINT()
     user32.GetCursorPos(ctypes.byref(actual))

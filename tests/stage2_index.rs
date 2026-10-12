@@ -405,7 +405,7 @@ fn native_watch_debounces_create_modify_rename_delete_and_reconfigure() {
     assert_eq!(monitor.watched_paths().len(), 1);
     let a = nested.join("added.jar");
     fs::write(&a, b"first").unwrap();
-    // Reconfiguring identical roots preserves events already queued by the native backend.
+    // 以相同根目录重新配置时，保留原生后端已排队的事件。
     assert!(
         monitor
             .reconfigure(std::slice::from_ref(&root))

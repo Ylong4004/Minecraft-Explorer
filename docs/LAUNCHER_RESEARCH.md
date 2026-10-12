@@ -1,4 +1,22 @@
-# 启动器接口核查（阶段 2）
+# 启动器接口核查
+
+## 0.4.1 再核查与用户绑定脚本（2026-10-12）
+
+再次读取当前 [PCL 启动入口](https://github.com/Meloong-Git/PCL/blob/main/Plain%20Craft%20Launcher%202/Application.xaml.vb)、[PCL CE StartupService](https://github.com/PCL-Community/PCL-CE/blob/dev/PCL.Core/App/Essentials/StartupService.cs) 与 [HMCL UpdateHandler](https://github.com/HMCL-dev/HMCL/blob/main/HMCL/src/main/java/org/jackhuang/hmcl/upgrade/UpdateHandler.java)，仍未确认可以指定根目录及版本、并实测启动游戏的外部入口；原生适配器能力保持 OpenLauncher。
+
+0.4.1 新增用户为具体映射绑定 BAT / CMD 的独立入口。[PCL 官方自定义事件文档](https://github.com/Meloong-Git/PCL/wiki/自定义事件) 描述 `LatestLaunch.bat` 保存上次启动脚本；因此不会自动发现或执行它，以免启动别的版本。用户需另存目标版本专用脚本，确认版本和原工作目录后绑定。脚本可能含有登录信息，本程序不读取其内容，不生成、不替换、不管理登录参数。
+
+生成的无害 CMD 已通过 Windows 实际执行测试，路径含中文、空格、& 和括号，覆盖指定工作目录、映射持久化、旧配置兼容及跨根目录拒绝。没有用用户真实脚本启动 Minecraft，此测试不代替真实游戏和登录有效性验收。教程见根 README；下文保留此前核查记录。
+
+## 阶段 4 实际打开验收（2026-10-12）
+
+用户补充 PCL CE 绑定后无法打开，并明确要求再次打开。本机 EXE 的 Windows 兼容性设置为 `~ RUNASADMIN`，同路径 CreateProcess 实测返回错误 740；隔离副本无该路径兼容性设置，因此此前假启动器或副本测试未覆盖该故障。
+
+通过系统 Shell 打开 `D:\PCL2 CE\PCL2_CE_Release_x64.exe` 后，实际窗口标题为 Plain Craft Launcher Community Edition，响应正常。修复后的 Rust `launcher::spawn` 也实测走到 Shell 提权分支，并取得仍在运行的进程句柄。使用原工作目录、不传游戏参数，未修改兼容性或启动器配置，未启动 Minecraft；启动器自身会正常生成日志/运行数据。
+
+实现参考 [Microsoft ShellExecuteExW](https://learn.microsoft.com/en-us/windows/win32/api/shellapi/nf-shellapi-shellexecuteexw)。仅在系统明确返回 740 时处理管理员启动，无参数 EXE 使用 open 动词和独立工作目录，不拼接命令行。UAC 取消返回明确提示，不自动换其他安装。此验收确认 OpenLauncher，仍不能证明选择实例或 LaunchInstance。
+
+下文阶段 2 的未运行说明是当时的历史记录；PCL2/HMCL 与指定实例直接启动的实测限制仍适用。
 
 核查日期：2026-10-11。**未完成真实指定实例启动验收，当前适配器只启用 OpenLauncher。** 下述源码检查不是对所有发行版本“不支持接口”的证明；目前没有找到并实测通过可公开依赖的指定实例外部启动入口。
 

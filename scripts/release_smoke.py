@@ -1,10 +1,11 @@
-"""Verify the packaged normal build using a fresh cache and its own HWND only."""
+"""用全新缓存和本程序自己的窗口句柄验证常规发布构建。"""
 import ctypes
 from ctypes import wintypes as w
 import json
 import os
 from pathlib import Path
 import sqlite3
+import struct
 import subprocess
 import sys
 import time
@@ -13,13 +14,42 @@ import uuid
 BASE = Path(__file__).resolve().parents[1]
 RUN = BASE / ".test-artifacts" / ("release-" + uuid.uuid4().hex[:8])
 RUN.mkdir(parents=True)
-exe = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else BASE / "dist/MinecraftExplorer/MinecraftExplorer.exe"
+exe = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else BASE / "target/release/minecraft-explorer.exe"
 binary = exe.read_bytes()
+assert (BASE / "assets/third-party-licenses.txt.gz").read_bytes() in binary, "Embedded license texts missing"
+kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+kernel32.LoadLibraryExW.argtypes = [w.LPCWSTR, w.HANDLE, w.DWORD]
+kernel32.LoadLibraryExW.restype = w.HMODULE
+kernel32.FindResourceW.argtypes = [w.HMODULE, ctypes.c_void_p, ctypes.c_void_p]
+kernel32.FindResourceW.restype = w.HANDLE
+kernel32.LoadResource.argtypes = [w.HMODULE, w.HANDLE]
+kernel32.LoadResource.restype = w.HANDLE
+kernel32.SizeofResource.argtypes = [w.HMODULE, w.HANDLE]
+kernel32.SizeofResource.restype = w.DWORD
+kernel32.LockResource.argtypes = [w.HANDLE]
+kernel32.LockResource.restype = ctypes.c_void_p
+kernel32.FreeLibrary.argtypes = [w.HMODULE]
+# 作为数据加载 EXE，不执行入口；核对资源管理器使用的图标组及七个尺寸。
+module = kernel32.LoadLibraryExW(str(exe), None, 0x2 | 0x20)
+assert module, "Could not read EXE resources"
+try:
+    resource = kernel32.FindResourceW(module, ctypes.c_void_p(1), ctypes.c_void_p(14))
+    assert resource, "EXE icon resource missing"
+    data = ctypes.string_at(kernel32.LockResource(kernel32.LoadResource(module, resource)),
+                           kernel32.SizeofResource(module, resource))
+    reserved, kind, count = struct.unpack_from("<HHH", data)
+    assert reserved == 0 and kind == 1 and count == 7, "Invalid EXE icon group"
+    sizes = {(data[6 + i * 14] or 256, data[7 + i * 14] or 256) for i in range(count)}
+    assert sizes == {(n, n) for n in (16, 24, 32, 48, 64, 128, 256)}, sizes
+finally:
+    kernel32.FreeLibrary(module)
 assert b"MINECRAFT_EXPLORER_UI_STAGE2" not in binary, "UI test harness included in normal build"
 assert b"MINECRAFT_EXPLORER_UI_SMOKE" not in binary, "UI test harness included in normal build"
+assert b"MINECRAFT_EXPLORER_UI_STAGE3" not in binary, "Stage 3 UI test harness included in normal build"
+assert b"MINECRAFT_EXPLORER_UI_STAGE4" not in binary, "Stage 4 UI test harness included in normal build"
 environment = os.environ.copy()
 environment["MINECRAFT_EXPLORER_DATA"] = str(RUN / "app-data")
-for name in ("MINECRAFT_EXPLORER_UI_SMOKE", "MINECRAFT_EXPLORER_UI_STAGE2", "MINECRAFT_EXPLORER_UI_REAL", "MINECRAFT_EXPLORER_UI_STAGE2_VERIFY"):
+for name in ("MINECRAFT_EXPLORER_UI_SMOKE", "MINECRAFT_EXPLORER_UI_STAGE2", "MINECRAFT_EXPLORER_UI_STAGE3", "MINECRAFT_EXPLORER_UI_STAGE4", "MINECRAFT_EXPLORER_UI_STAGE4_VERIFY", "MINECRAFT_EXPLORER_UI_REAL", "MINECRAFT_EXPLORER_UI_STAGE2_VERIFY"):
     environment.pop(name, None)
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 user32.GetWindowThreadProcessId.argtypes = [w.HWND, ctypes.POINTER(w.DWORD)]
@@ -47,7 +77,7 @@ def find_window(pid):
     return found[0] if found else None
 
 
-result = {"exe": str(exe), "test_harness_absent": True, "fresh_cache": True}
+result = {"exe": str(exe), "test_harness_absent": True, "embedded_licenses_verified": True, "fresh_cache": True}
 process = None
 hwnd = None
 with (RUN / "stderr.txt").open("w", encoding="utf-8") as error:
@@ -60,6 +90,22 @@ with (RUN / "stderr.txt").open("w", encoding="utf-8") as error:
             hwnd = find_window(process.pid)
             time.sleep(.1)
         assert hwnd, "Release window did not appear"
+        # 原生 HWND 可见时首次绘制可能仍在初始化；启动就绪与运行中响应分别测量。
+        startup_timeouts = 0
+        while True:
+            response = ctypes.c_size_t()
+            if user32.SendMessageTimeoutW(hwnd, 0, 0, 0, 2, 1000, ctypes.byref(response)):
+                break
+            startup_timeouts += 1
+            assert process.poll() is None, "Release exited during startup"
+            assert time.monotonic() - started < 20, "Release startup never became responsive"
+        result.update(first_response_seconds=time.monotonic() - started,
+                      startup_response_timeouts=startup_timeouts)
+        window_icon = ctypes.c_size_t()
+        # Winit 在 Windows 上将 Slint Window.icon 设置为 ICON_SMALL（标题栏图标）。
+        assert user32.SendMessageTimeoutW(hwnd, 0x007F, 0, 0, 2, 1000, ctypes.byref(window_icon)), "Could not query window icon"
+        assert window_icon.value, "Window icon missing"
+        result["exe_and_window_icons_verified"] = True
         samples = []
         for _ in range(10):
             before = time.perf_counter()

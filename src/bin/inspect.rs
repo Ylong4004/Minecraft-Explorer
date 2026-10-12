@@ -1,4 +1,4 @@
-//! Read-only inspection using the exact same scanner and index as the desktop app.
+//! 只读检查，使用与桌面程序相同的扫描器和索引。
 use anyhow::{Context, Result, bail};
 use minecraft_explorer::{
     index::Index,
@@ -39,8 +39,8 @@ fn main() -> Result<()> {
     {
         bail!("缓存目录必须位于 Minecraft 根目录之外");
     }
-    // Validate existing ancestors before creating anything: an output junction
-    // must not redirect cache writes into Minecraft or outside the requested path.
+    // 创建文件前验证现存祖先路径，避免输出目录的联接
+    // 将缓存写入 Minecraft 或指定目录之外。
     let mut ancestor = output.as_path();
     while !ancestor.exists() {
         ancestor = ancestor.parent().context("缓存目录缺少可访问的父目录")?;
@@ -67,6 +67,13 @@ fn main() -> Result<()> {
             ScanEvent::Discovered(items) => {
                 eprintln!("发现 {} 个条目", items.len());
                 db.discovered(&items, generation)
+            }
+            ScanEvent::Metadata(mut item) => {
+                if let Ok(Some(old)) = db.get(&item.id) {
+                    item.size = old.size;
+                    item.size_complete = old.size_complete;
+                }
+                db.upsert(&item, generation)
             }
             ScanEvent::Updated(item) => db.upsert(&item, generation),
             ScanEvent::Progress {

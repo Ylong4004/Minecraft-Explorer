@@ -1,5 +1,5 @@
-//! Read-only duplicate candidates. Equality refers to complete, stable file bytes only;
-//! no files or directories are renamed, deleted, extracted, or otherwise modified.
+//! 只读重复候选；相同仅指完整且稳定的文件字节相同，
+//! 不重命名、删除、解压或修改任何文件和目录。
 use crate::{
     models::{Item, ItemKind},
     platform::{checked_path, is_link, path_key},
@@ -84,7 +84,7 @@ pub fn find(
     };
     progress(status);
     let mut equal: BTreeMap<(u64, String), Vec<Item>> = BTreeMap::new();
-    // One file and one 256 KiB buffer at a time, independently of candidate count.
+    // 每次只处理一个文件和一个 256 KiB 缓冲区，不随候选数量增加。
     let mut buffer = vec![0_u8; 256 * 1024];
     for (size, entries) in sizes {
         for item in entries {
@@ -148,7 +148,7 @@ fn stable_hash(
         if cancel.load(Ordering::Relaxed) {
             return Ok(None);
         }
-        // Re-check every component before each read; reparse points never become a hash source.
+        // 每次读取前重查路径各组成部分，重解析点不能成为哈希来源。
         if path_key(&checked_path(path)?) != path_key(&checked) {
             bail!("读取期间路径已变化，跳过");
         }

@@ -1,14 +1,26 @@
-import { Button, LineEdit, ComboBox, CheckBox, ScrollView, ListView, AboutSlint } from "std-widgets.slint";
+import { Button, LineEdit, ComboBox, CheckBox, ScrollView, ListView, AboutSlint, Palette } from "std-widgets.slint";
+
+export global I18n {
+    in-out property <bool> english;
+    pure callback translate(string) -> string;
+    public pure function text(value: string) -> string { return I18n.english ? I18n.translate(value) : value; }
+}
+export global Theme {
+    in-out property <bool> light;
+    public pure function shade(dark: color, light: color) -> color { return Theme.light ? light : dark; }
+}
 
 export struct EntryRow {
     id: string, title: string, kind: string, owner: string, path: string,
-    size: string, time: string, available: bool, icon: image, icon-key: string,
+    size: string, time: string, available: bool, icon: image, icon-key: string, checked: bool,
 }
 export struct SourceRow { path: string, label: string }
 export struct LauncherRow { id: string, label: string, path: string }
+export struct SpaceTile { node: int, title: string, info: string, size: string, x: float, y: float, w: float, h: float, tint: color, directory: bool, item-id: string }
+export struct SpaceBar { title: string, size: string, ratio: float, tint: color }
 
 component Label inherits Text {
-    color: #c4cbd6;
+    color: Theme.shade(#c4cbd6, #344557);
     font-size: 13px;
     overflow: elide;
 }
@@ -19,48 +31,93 @@ component EntryListRow inherits Rectangle {
     callback select(string);
     callback reveal(string);
     callback request-icon(string, string);
+    callback toggle(string);
+    callback action(string, int);
     init => { root.request-icon(root.data.id, root.data.icon-key); }
     changed data => { root.request-icon(root.data.id, root.data.icon-key); }
     height: 74px;
-    background: root.selected ? #24443d : row-touch.has-hover ? #1e2b36 : #171f2a;
+    background: root.selected ? Theme.shade(#24443d, #d2efe2) : row-touch.has-hover ? Theme.shade(#1e2b36, #e8f1f7) : Theme.shade(#171f2a, #ffffff);
+    animate background { duration: 110ms; }
     HorizontalLayout { padding: 10px; spacing: 10px;
-        Rectangle { width: 40px; height: 40px; border-radius: 4px; background: #263b3c;
+        CheckBox { width: 24px; checked: root.data.checked; toggled => { root.toggle(root.data.id); } }
+        Rectangle { width: 40px; height: 40px; border-radius: 4px; background: Theme.shade(#263b3c, #d9e9e3);
             if root.data.icon.width > 0 : Image { source: root.data.icon; image-fit: contain; width: 40px; height: 40px; }
             if root.data.icon.width == 0 : Text { text: "▦"; width: 40px; height: 40px; color: #85c9aa; font-size: 24px; horizontal-alignment: center; vertical-alignment: center; }
         }
         VerticalLayout { spacing: 4px;
             HorizontalLayout { spacing: 10px;
-                Text { text: root.data.kind + " · " + root.data.title; color: root.data.available ? #eff4fa : #dfaa86; font-weight: 600; overflow: elide; horizontal-stretch: 1; }
+                Text { text: root.data.kind + " · " + root.data.title; color: root.data.available ? Theme.shade(#eff4fa, #182532) : Theme.shade(#dfaa86, #925127); font-weight: 600; overflow: elide; horizontal-stretch: 1; }
                 Label { text: root.data.size; width: 105px; }
                 Label { text: root.data.time; width: 140px; font-size: 11px; }
             }
             Label { text: root.data.owner; font-size: 12px; }
-            Label { text: root.data.path; font-size: 11px; color: #8696aa; }
+            Label { text: root.data.path; font-size: 11px; color: Theme.shade(#8696aa, #596d82); }
         }
     }
-    row-touch := TouchArea {
-        clicked => { root.select(root.data.id); }
-        double-clicked => { root.reveal(root.data.id); }
+    ContextMenuArea {
+        x: 40px; width: parent.width - 40px;
+        Menu {
+            MenuItem { title: I18n.text("定位目录"); activated => { root.action(root.data.id, 0); } }
+            MenuItem { title: I18n.text("复制路径 Ctrl+C"); activated => { root.action(root.data.id, 1); } }
+            MenuItem { title: I18n.text("重命名 F2"); activated => { root.action(root.data.id, 2); } }
+            MenuItem { title: I18n.text("复制"); activated => { root.action(root.data.id, 3); } }
+            MenuItem { title: I18n.text("移动"); activated => { root.action(root.data.id, 4); } }
+            MenuItem { title: I18n.text("备份"); activated => { root.action(root.data.id, 5); } }
+            MenuItem { title: I18n.text("回收 Delete"); activated => { root.action(root.data.id, 6); } }
+            MenuItem { title: I18n.text("切换收藏"); activated => { root.action(root.data.id, 7); } }
+            MenuItem { title: I18n.text("打开所选启动器"); activated => { root.action(root.data.id, 8); } }
+        }
+        row-touch := TouchArea {
+            clicked => { root.select(root.data.id); }
+            double-clicked => { root.reveal(root.data.id); }
+        }
     }
 }
 
 export component AppWindow inherits Window {
     title: "Minecraft Explorer";
+    icon: @image-url("../assets/icon-256.png");
     preferred-width: 1260px; preferred-height: 790px;
     min-width: 1020px; min-height: 620px;
-    background: #10141b;
+    background: Theme.shade(#10141b, #f1f4f8);
     default-font-family: "Microsoft YaHei UI";
     default-font-size: 13px;
     in-out property <int> page: 2;
+    in-out property <bool> english <=> I18n.english;
+    in-out property <bool> light-theme <=> Theme.light;
+    in-out property <int> space-index;
+    in property <[string]> space-scopes;
+    in property <[SpaceTile]> space-tiles;
+    in property <[SpaceBar]> space-bars;
+    in property <string> space-summary: I18n.text("请开始分析，统计实际文件大小");
+    in property <string> space-bytes;
+    in property <string> space-path;
+    in-out property <string> space-info;
+    in property <string> space-advice;
+    in property <bool> space-can-up;
+    in property <bool> space-can-reveal;
+    in property <bool> space-can-view;
+    in property <int> space-selected: -1;
+    callback appearance-changed();
+    callback export-licenses();
+    callback analyze-space();
+    callback space-scope-changed();
+    callback space-action(int, int);
+    callback entry-action(string, int);
+    callback keyboard-action(int);
+    init => { Palette.color-scheme = root.light-theme ? ColorScheme.light : ColorScheme.dark; }
+    changed light-theme => { Palette.color-scheme = root.light-theme ? ColorScheme.light : ColorScheme.dark; }
+    changed space-index => { root.space-scope-changed(); }
     in-out property <string> search;
     in-out property <int> sort-index: 0;
     in-out property <int> filter-index: 0;
     in property <[string]> filters;
     in property <[EntryRow]> entries;
+    in-out property <int> current-row-index: -1;
     in property <[SourceRow]> sources;
     in property <[LauncherRow]> launchers;
     in-out property <string> selected-id;
-    in property <string> status: "正在打开本地索引…";
+    in property <string> status: I18n.text("正在打开本地索引…");
     in property <bool> scanning;
     in property <float> progress;
     in property <string> summary;
@@ -72,6 +129,9 @@ export component AppWindow inherits Window {
     in property <string> launch-status: "LauncherNotConfigured";
     in property <string> launch-hint;
     in property <bool> can-open;
+    in property <bool> can-launch-script;
+    in-out property <string> mapping-script;
+    in-out property <string> mapping-script-workdir;
     in property <string> target-name;
     in-out property <int> launcher-index: 0;
     in property <[string]> launcher-labels;
@@ -98,7 +158,31 @@ export component AppWindow inherits Window {
     in-out property <int> source-index: 0;
     in property <[string]> source-labels;
     in-out property <bool> watch-enabled;
-    in property <string> duplicate-summary: "点击检测，按大小筛选后读取文件哈希；仅报告候选，不删除文件。";
+    in property <string> duplicate-summary: I18n.text("点击检测，按大小筛选后读取文件哈希；仅报告候选，不删除文件。");
+    in property <int> checked-count;
+    in-out property <int> operation-choice;
+    in-out property <bool> operation-visible;
+    in-out property <int> operation-action;
+    in-out property <string> operation-name;
+    in-out property <string> operation-parent;
+    in-out property <string> operation-backup;
+    in-out property <int> operation-conflict;
+    in-out property <int> operation-version-scope;
+    in-out property <bool> operation-confirmed;
+    in property <bool> operation-ready;
+    in property <string> operation-preview;
+    in property <string> operation-history: I18n.text("正在读取操作记录…");
+    callback toggle-entry(string);
+    callback select-all();
+    callback clear-selection();
+    callback begin-operation(int, bool);
+    callback browse-operation(int);
+    callback prepare-operation();
+    callback confirm-operation();
+    callback dismiss-operation();
+    callback operation-edited();
+    callback show-history();
+    callback reveal-history();
     callback navigate(int);
     callback query-changed();
     callback refresh();
@@ -110,6 +194,8 @@ export component AppWindow inherits Window {
     callback copy-selected();
     callback copy-target();
     callback open-launcher();
+    callback launch-script();
+    callback mapping-target-changed();
     callback launcher-changed();
     callback begin-mapping();
     callback save-mapping();
@@ -131,12 +217,27 @@ export component AppWindow inherits Window {
     changed favorite-only => { root.query-changed(); }
     changed tag-filter => { root.query-changed(); }
     changed source-index => { root.query-changed(); }
+    changed operation-name => { root.operation-edited(); }
+    changed operation-parent => { root.operation-edited(); }
+    changed operation-backup => { root.operation-edited(); }
+    changed operation-conflict => { root.operation-edited(); }
+    changed operation-version-scope => { root.operation-edited(); }
 
     focus := FocusScope {
         key-pressed(event) => {
             if (event.text == Key.F5) { root.refresh(); return accept; }
-            if (event.modifiers.control && (event.text == "f" || event.text == "k")) { search-field.focus(); return accept; }
-            if (event.text == Key.Escape) { root.mapping-visible = false; root.editor-visible = false; root.about-visible = false; return accept; }
+            if (event.modifiers.control && (event.text == "f" || event.text == "F" || event.text == "k" || event.text == "K")) { search-field.focus(); return accept; }
+            if (event.text == Key.Escape) { if root.operation-visible { root.dismiss-operation(); } root.mapping-visible = false; root.editor-visible = false; root.about-visible = false; return accept; }
+            if !root.operation-visible && !root.mapping-visible && !root.editor-visible && !root.about-visible && ((root.page >= 0 && root.page <= 5) || root.page >= 9) {
+                if (event.text == Key.F2) { root.keyboard-action(2); return accept; }
+                if (event.text == Key.Delete) { root.keyboard-action(6); return accept; }
+                if (event.text == Key.Return) { root.keyboard-action(0); return accept; }
+                if (event.text == Key.UpArrow) { root.keyboard-action(12); return accept; }
+                if (event.text == Key.DownArrow) { root.keyboard-action(13); return accept; }
+                if (event.modifiers.control && (event.text == "a" || event.text == "A")) { root.keyboard-action(event.modifiers.shift ? 11 : 10); return accept; }
+                if (event.modifiers.control && (event.text == "c" || event.text == "C")) { root.keyboard-action(1); return accept; }
+                if (event.modifiers.control && (event.text == "b" || event.text == "B")) { root.keyboard-action(5); return accept; }
+            }
             return reject;
         }
         VerticalLayout {
@@ -144,49 +245,56 @@ export component AppWindow inherits Window {
             HorizontalLayout {
                 spacing: 0px;
                 Rectangle {
-                    width: 184px; background: #181e28;
+                    width: 184px; background: Theme.shade(#181e28, #e4eaf2);
                     VerticalLayout {
                         padding: 16px; spacing: 8px;
                         Text { text: "MINECRAFT"; color: #76dfb0; font-weight: 700; font-size: 17px; height: 28px; }
-                        Label { text: "EXPLORER   /   本地索引"; font-size: 11px; height: 32px; }
+                        Label { text: I18n.text("EXPLORER   /   本地索引"); font-size: 11px; height: 32px; }
                         ListView { vertical-stretch: 1;
-                        for label[i] in ["总览", "游戏版本 / 实例", "全部存档", "全部资源包", "全部模组", "全部光影包", "空间分析", "清理与备份", "设置", "全部数据包", "收藏", "最近打开", "重复文件候选"] : Rectangle {
+                        for label[i] in [I18n.text("总览"), I18n.text("游戏版本 / 实例"), I18n.text("全部存档"), I18n.text("全部资源包"), I18n.text("全部模组"), I18n.text("全部光影包"), I18n.text("空间分析"), I18n.text("清理与备份"), I18n.text("设置"), I18n.text("全部数据包"), I18n.text("收藏"), I18n.text("最近打开"), I18n.text("重复文件候选")] : Rectangle {
                             height: 46px;
                             Rectangle { height: 38px; border-radius: 5px;
-                            background: root.page == i ? #263b3c : nav.has-hover ? #242d3a : transparent;
-                            Text { text: label; x: 10px; vertical-alignment: center; color: root.page == i ? #8fefbf : #c4cbd6; }
+                            background: root.page == i ? Theme.shade(#263b3c, #d9e9e3) : nav.has-hover ? Theme.shade(#242d3a, #d4dfea) : transparent;
+                            Text { text: label; x: 10px; vertical-alignment: center; color: root.page == i ? Theme.shade(#8fefbf, #16714b) : Theme.shade(#c4cbd6, #344557); }
                             nav := TouchArea { clicked => { root.page = i; root.navigate(i); } }
                             }
                         }
                         }
-                        Label { text: "阶段 2 · 只读管理"; font-size: 12px; height: 22px; }
+                        Label { text: I18n.text("空间与内容管理"); font-size: 12px; height: 22px; }
                         Label { text: "Made with Slint"; font-size: 11px; height: 22px; }
                     }
                 }
                 VerticalLayout {
                     padding: 20px; spacing: 14px;
                     HorizontalLayout {
-                        search-field := LineEdit { text <=> root.search; placeholder-text: "搜索地图名、实例、版本 ID 或真实路径…"; edited => { root.query-changed(); } }
-                        Button { text: "刷新 F5"; enabled: !root.scanning; clicked => { root.refresh(); } }
-                        Button { text: "取消任务"; enabled: root.scanning; clicked => { root.cancel-scan(); } }
+                        search-field := LineEdit { text <=> root.search; placeholder-text: I18n.text("搜索地图名、实例、版本 ID 或真实路径…"); edited => { root.query-changed(); } }
+                        Button { text: I18n.text("刷新 F5"); enabled: !root.scanning; clicked => { root.refresh(); } }
+                        Button { text: I18n.text("取消任务"); enabled: root.scanning; clicked => { root.cancel-scan(); } }
                     }
                     if root.page != 8 : HorizontalLayout {
-                        Text { text: root.page == 0 ? "总览 / 全局搜索" : root.page == 1 ? "游戏版本 / 实际游戏目录" : root.page == 2 ? "全部存档" : root.page == 3 ? "全部资源包" : root.page == 4 ? "全部模组" : root.page == 5 ? "全部光影包" : root.page == 9 ? "全部数据包" : root.page == 10 ? "收藏" : root.page == 11 ? "最近打开" : root.page == 12 ? "重复文件候选" : root.page == 6 ? "空间分析" : "后续阶段功能"; color: #f1f5fa; font-size: 22px; font-weight: 600; }
+                        Text { text: root.page == 0 ? I18n.text("总览 / 全局搜索") : root.page == 1 ? I18n.text("游戏版本 / 实际游戏目录") : root.page == 2 ? I18n.text("全部存档") : root.page == 3 ? I18n.text("全部资源包") : root.page == 4 ? I18n.text("全部模组") : root.page == 5 ? I18n.text("全部光影包") : root.page == 9 ? I18n.text("全部数据包") : root.page == 10 ? I18n.text("收藏") : root.page == 11 ? I18n.text("最近打开") : root.page == 12 ? I18n.text("重复文件候选") : root.page == 6 ? I18n.text("空间分析") : I18n.text("清理与备份 / 操作记录"); color: Theme.shade(#f1f5fa, #182532); font-size: 22px; font-weight: 600; }
                         Rectangle { horizontal-stretch: 1; }
-                        ComboBox { width: 190px; model: root.filters; current-index <=> root.filter-index; }
-                        ComboBox { width: 155px; model: ["名称 A → Z", "大小 ↓", "大小 ↑", "时间 ↓", "时间 ↑", "所属目录", "最近打开 ↓"]; current-index <=> root.sort-index; }
+                        if root.page != 6 && root.page != 7 : ComboBox { width: 190px; model: root.filters; current-index <=> root.filter-index; }
+                        if root.page != 6 && root.page != 7 : ComboBox { width: 155px; model: [I18n.text("名称 A → Z"), I18n.text("大小 ↓"), I18n.text("大小 ↑"), I18n.text("时间 ↓"), I18n.text("时间 ↑"), I18n.text("所属目录"), I18n.text("最近打开 ↓")]; current-index <=> root.sort-index; }
                     }
                     if root.page != 8 && root.page != 6 && root.page != 7 : HorizontalLayout {
                         ComboBox { width: 220px; model: root.source-labels; current-index <=> root.source-index; }
-                        LineEdit { text <=> root.tag-filter; placeholder-text: "按完整标签筛选"; }
-                        CheckBox { text: "仅收藏"; checked <=> root.favorite-only; }
-                        if root.page == 12 : Button { text: "检测重复候选"; enabled: !root.scanning; clicked => { root.find-duplicates(); } }
+                        LineEdit { text <=> root.tag-filter; placeholder-text: I18n.text("按完整标签筛选"); }
+                        CheckBox { text: I18n.text("仅收藏"); checked <=> root.favorite-only; }
+                        if root.page == 12 : Button { text: I18n.text("检测重复候选"); enabled: !root.scanning; clicked => { root.find-duplicates(); } }
                     }
                     if root.page == 12 : Label { text: root.duplicate-summary; wrap: word-wrap; }
+                    if (root.page >= 0 && root.page <= 5) || root.page >= 9 : HorizontalLayout {
+                        Label { text: I18n.text("已勾选 ") + root.checked-count + I18n.text(" 项"); width: 100px; }
+                        Button { text: I18n.text("全选当前列表"); enabled: !root.scanning; clicked => { root.select-all(); } }
+                        Button { text: I18n.text("清空"); clicked => { root.clear-selection(); } }
+                        ComboBox { width: 135px; model: [I18n.text("重命名"), I18n.text("复制"), I18n.text("移动"), I18n.text("备份"), I18n.text("移入回收站")]; current-index <=> root.operation-choice; }
+                        Button { text: I18n.text("预览操作…"); enabled: !root.scanning && (root.checked-count > 0 || root.selected-id != ""); clicked => { root.begin-operation(root.operation-choice, false); } }
+                    }
                     if root.page == 0 : Rectangle {
-                        background: #1b2430; border-radius: 7px; height: 104px;
+                        background: Theme.shade(#1b2430, #ffffff); border-radius: 7px; height: 104px;
                         VerticalLayout { padding: 14px;
-                            Text { text: root.counts; color: #8fefbf; font-size: 16px; wrap: word-wrap; }
+                            Text { text: root.counts; color: Theme.shade(#8fefbf, #16714b); font-size: 16px; wrap: word-wrap; }
                             Label { text: root.summary; }
                         }
                     }
@@ -194,131 +302,252 @@ export component AppWindow inherits Window {
                         spacing: 14px;
                         VerticalLayout {
                             spacing: 0px;
-                            Rectangle { height: 35px; background: #212a37;
+                            Rectangle { height: 35px; background: Theme.shade(#212a37, #dde5ef);
                                 HorizontalLayout { padding-left: 10px; padding-right: 10px; spacing: 8px;
-                                    Button { text: "名称"; horizontal-stretch: 1; clicked => { root.sort-index = 0; } }
-                                    Button { text: "逻辑大小"; width: 105px; clicked => { root.sort-index = root.sort-index == 1 ? 2 : 1; } }
-                                    Button { text: "游玩 / 修改时间"; width: 140px; clicked => { root.sort-index = root.sort-index == 3 ? 4 : 3; } }
+                                    Button { text: I18n.text("名称"); horizontal-stretch: 1; clicked => { root.sort-index = 0; } }
+                                    Button { text: I18n.text("逻辑大小"); width: 105px; clicked => { root.sort-index = root.sort-index == 1 ? 2 : 1; } }
+                                    Button { text: I18n.text("游玩 / 修改时间"); width: 140px; clicked => { root.sort-index = root.sort-index == 3 ? 4 : 3; } }
                                 }
                             }
                             ListView {
+                                in property <int> keyboard-index: root.current-row-index;
+                                changed keyboard-index => {
+                                    let top = self.keyboard-index * 74px;
+                                    if self.keyboard-index < 0 { self.content-y = 0px; }
+                                    if self.keyboard-index >= 0 {
+                                        if top + self.content-y < 0px { self.content-y = -top; }
+                                        if top + self.content-y + 74px > self.visible-height { self.content-y = self.visible-height - top - 74px; }
+                                    }
+                                }
                                 for entry in root.entries : EntryListRow {
                                     data: entry;
                                     selected: root.selected-id == entry.id;
-                                    select(id) => { root.selected-id = id; root.selected(id); }
+                                    select(id) => { focus.focus(); root.selected-id = id; root.selected(id); }
                                     reveal(id) => { root.selected-id = id; root.selected(id); root.reveal-selected(); }
                                     request-icon(id,key) => { root.request-row-icon(id,key); }
+                                    toggle(id) => { root.toggle-entry(id); }
+                                    action(id,kind) => { root.entry-action(id,kind); }
                                 }
                             }
                             if root.entries.length == 0 : Rectangle { height: 120px;
-                                Text { text: root.sources.length == 0 ? "尚未添加目录\n在设置中添加 Minecraft 根目录或自定义游戏目录" : root.scanning ? "正在发现目录与读取元信息…" : "没有匹配结果\n可修改搜索条件或刷新；诊断信息在设置中查看"; color: #91a0b3; horizontal-alignment: center; vertical-alignment: center; }
+                                Text { text: root.sources.length == 0 ? I18n.text("尚未添加目录\n在设置中添加 Minecraft 根目录或自定义游戏目录") : root.scanning ? I18n.text("正在发现目录与读取元信息…") : I18n.text("没有匹配结果\n可修改搜索条件或刷新；诊断信息在设置中查看"); color: Theme.shade(#91a0b3, #52667d); horizontal-alignment: center; vertical-alignment: center; }
                             }
                         }
                         if root.selected-id != "" : Rectangle {
-                            width: 330px; background: #1a2330; border-radius: 7px;
+                            width: 330px; background: Theme.shade(#1a2330, #ffffff); border-radius: 7px;
                             VerticalLayout { padding: 14px; spacing: 10px;
                                 HorizontalLayout {
                                     Rectangle { width: 48px; height: 48px; background: #2c5545; border-radius: 5px;
                                         if root.has-icon : Image { source: root.detail-icon; image-fit: contain; width: parent.width; height: parent.height; }
                                         if !root.has-icon : Text { text: "▦"; color: #9af0bc; font-size: 27px; horizontal-alignment: center; vertical-alignment: center; }
                                     }
-                                    Text { text: root.detail-title; color: #f1f5fa; font-weight: 600; font-size: 17px; wrap: word-wrap; }
+                                    Text { text: root.detail-title; color: Theme.shade(#f1f5fa, #182532); font-weight: 600; font-size: 17px; wrap: word-wrap; }
                                     Button { text: "×"; width: 34px; clicked => { root.selected-id = ""; } }
                                 }
                                 detail-scroll := ScrollView { vertical-stretch: 1; content-width: self.visible-width;
-                                    Text { x: 0px; y: 0px; width: detail-scroll.visible-width; text: root.detail-text; color: #b6c2d1; wrap: word-wrap; font-size: 12px; horizontal-alignment: left; vertical-alignment: top; }
+                                    Text { x: 0px; y: 0px; width: detail-scroll.visible-width; text: root.detail-text; color: Theme.shade(#b6c2d1, #344557); wrap: word-wrap; font-size: 12px; horizontal-alignment: left; vertical-alignment: top; }
                                 }
                                 HorizontalLayout {
-                                    Button { text: "定位目录"; clicked => { root.reveal-selected(); } }
-                                    Button { text: "复制路径"; clicked => { root.copy-selected(); } }
+                                    Button { text: I18n.text("定位目录"); clicked => { root.reveal-selected(); } }
+                                    Button { text: I18n.text("复制路径"); clicked => { root.copy-selected(); } }
                                 }
                                 HorizontalLayout {
-                                    CheckBox { text: "收藏"; checked <=> root.detail-favorite; toggled => { root.annotate-selected(); } }
-                                    Button { text: "保存标签"; clicked => { root.annotate-selected(); } }
+                                    CheckBox { text: I18n.text("收藏"); checked <=> root.detail-favorite; toggled => { root.annotate-selected(); } }
+                                    Button { text: I18n.text("保存标签"); clicked => { root.annotate-selected(); } }
                                 }
-                                LineEdit { text <=> root.detail-tags; placeholder-text: "标签以逗号分隔"; }
+                                LineEdit { text <=> root.detail-tags; placeholder-text: I18n.text("标签以逗号分隔"); }
+                                HorizontalLayout {
+                                    Button { text: I18n.text("备份此项…"); enabled: !root.scanning; clicked => { root.begin-operation(3,true); } }
+                                    Button { text: I18n.text("回收此项…"); enabled: !root.scanning; clicked => { root.begin-operation(4,true); } }
+                                }
                                 ComboBox { model: root.launcher-labels; current-index <=> root.launcher-index; }
-                                Text { text: root.launch-status; color: #86dfb5; font-weight: 600; }
+                                Text { text: root.launch-status; color: Theme.shade(#86dfb5, #16714b); font-weight: 600; }
                                 Label { text: root.launch-hint; wrap: word-wrap; }
-                                Button { text: "启动所在版本（未验证）"; enabled: false; }
-                                Button { text: "打开所选启动器"; enabled: root.can-open; clicked => { root.open-launcher(); } }
+                                Button { text: I18n.text("启动关联脚本"); enabled: root.can-launch-script && !root.scanning; clicked => { root.launch-script(); } }
+                                Button { text: I18n.text("打开所选启动器"); enabled: root.can-open; clicked => { root.open-launcher(); } }
                                 HorizontalLayout {
-                                    Button { text: "设置关联"; clicked => { root.begin-mapping(); } }
-                                    Button { text: "复制目标 ID"; enabled: root.target-name != ""; clicked => { root.copy-target(); } }
+                                    Button { text: I18n.text("设置关联"); clicked => { root.begin-mapping(); } }
+                                    Button { text: I18n.text("复制目标 ID"); enabled: root.target-name != ""; clicked => { root.copy-target(); } }
                                 }
                             }
                         }
                     }
-                    if root.page == 6 || root.page == 7 : Rectangle {
-                        vertical-stretch: 1;
-                        Text { text: root.page == 6 ? root.summary + "\n\n阶段 1 提供世界 / 版本核心 / 游戏目录的逻辑大小。\n交互树图在后续阶段实现。" : "该页面将在后续阶段开放。\n当前可使用全部存档、游戏版本 / 实例和设置。"; color: #a5b5c8; wrap: word-wrap; vertical-alignment: center; horizontal-alignment: center; }
-                    }
-                    if root.page == 8 : VerticalLayout {
-                        spacing: 10px;
-                        Text { text: "目录与启动器设置"; color: #f1f5fa; font-size: 24px; }
+                    if root.page == 6 : analysis-scroll := ScrollView {
+                        content-width: self.visible-width;
+                        VerticalLayout { width: analysis-scroll.visible-width; height: max(550px,analysis-scroll.visible-height);
+                        spacing: 7px;
                         HorizontalLayout {
-                            Button { text: "添加 Minecraft 根目录"; enabled: !root.scanning; clicked => { root.add-source(0); } }
-                            Button { text: "添加自定义游戏目录"; enabled: !root.scanning; clicked => { root.add-source(1); } }
-                            Button { text: "添加启动器"; clicked => { root.edit-launcher(""); } }
-                            Button { text: "关于"; clicked => { root.about-visible = true; } }
+                            ComboBox { model: root.space-scopes; current-index <=> root.space-index; horizontal-stretch: 1; }
+                            Button { text: I18n.text("重新分析"); enabled: !root.scanning; clicked => { root.analyze-space(); } }
+                            Button { text: I18n.text("上一级"); enabled: root.space-can-up; clicked => { root.space-action(-1,2); } }
                         }
-                        Label { text: "移除目录仅删除本程序的索引关联；数据与缓存位于 Windows LocalAppData。"; }
-                        CheckBox { text: "监控目录变化并增量刷新（实例总大小可用 F5 重新计算）"; checked <=> root.watch-enabled; toggled => { root.watch-changed(); } }
+                        Label { text: root.space-summary; }
+                        Label { text: root.space-path; }
+                        HorizontalLayout { spacing: 12px; vertical-stretch: 1;
+                            VerticalLayout { horizontal-stretch: 1; spacing: 6px;
+                                canvas := Rectangle {
+                                    background: Theme.shade(#171f2a, #ffffff); min-height: 170px; vertical-stretch: 3;
+                                    for tile in root.space-tiles : Rectangle {
+                                        x: tile.x * canvas.width; y: tile.y * canvas.height;
+                                        width: max(0px,tile.w * canvas.width - 1px); height: max(0px,tile.h * canvas.height - 1px);
+                                        background: tile.tint; border-width: root.space-selected == tile.node && tile.node >= 0 ? 2px : 0px; border-color: white;
+                                        if self.width > 65px && self.height > 32px : Text { x: 5px; y: 4px; width: parent.width - 10px; text: tile.title + "\n" + tile.size; color: white; overflow: elide; font-size: 12px; }
+                                        ContextMenuArea {
+                                            Menu { MenuItem { title: I18n.text("定位目录"); enabled: tile.node >= 0; activated => { root.space-action(tile.node,3); } } }
+                                            tile-touch := TouchArea {
+                                                clicked => { root.space-action(tile.node,0); }
+                                                double-clicked => { if tile.directory { root.space-action(tile.node,1); } }
+                                                changed has-hover => { if self.has-hover { root.space-info = tile.info; } }
+                                            }
+                                        }
+                                    }
+                                }
+                                Label { text: root.space-info; height: 60px; wrap: word-wrap; }
+                                HorizontalLayout {
+                                    Button { text: I18n.text("打开选中位置"); enabled: root.space-can-reveal; clicked => { root.space-action(root.space-selected,3); } }
+                                    Button { text: I18n.text("在内容列表查看"); enabled: root.space-can-view; clicked => { root.space-action(root.space-selected,4); } }
+                                }
+                                ListView { min-height: 95px; vertical-stretch: 1;
+                                    for tile in root.space-tiles : Rectangle { height: 30px; background: root.space-selected == tile.node && tile.node >= 0 ? Theme.shade(#24443d, #d2efe2) : transparent;
+                                        HorizontalLayout { Label { text: tile.title; horizontal-stretch: 1; } Label { text: tile.size; width: 105px; } }
+                                        TouchArea { clicked => { root.space-action(tile.node,0); } double-clicked => { if tile.directory { root.space-action(tile.node,1); } } }
+                                    }
+                                }
+                            }
+                            VerticalLayout { width: 250px; spacing: 8px;
+                                for bar in root.space-bars : VerticalLayout { height: 38px; spacing: 3px;
+                                    HorizontalLayout { Label { text: bar.title; horizontal-stretch: 1; } Label { text: bar.size; width: 105px; } }
+                                    Rectangle { height: 12px; background: Theme.shade(#263b3c, #d9e9e3); Rectangle { width: parent.width * bar.ratio; background: bar.tint; } }
+                                }
+                                Label { text: I18n.text("空间建议"); font-weight: 600; }
+                                advice-scroll := ScrollView { vertical-stretch: 1; content-width: self.visible-width; Text { x: 0px; y: 0px; width: advice-scroll.visible-width; text: root.space-advice; wrap: word-wrap; vertical-alignment: top; color: Theme.shade(#c4cbd6, #344557); } }
+                                Button { text: I18n.text("检测重复候选"); enabled: !root.scanning; clicked => { root.page = 12; root.navigate(12); root.find-duplicates(); } }
+                            }
+                        }
+                        Label { text: I18n.text("共享目录只计一次；逻辑字节不是磁盘分配大小。文件夹双击钻取，小矩形合并显示。"); wrap: word-wrap; font-size: 11px; }
+                        }
+                    }
+                    if root.page == 7 : VerticalLayout {
                         HorizontalLayout {
-                            Label { text: "添加自定义游戏目录时，归属此根目录："; }
+                            Button { text: I18n.text("从目录备份恢复…"); enabled: !root.scanning; clicked => { root.begin-operation(5,false); } }
+                            Button { text: I18n.text("刷新记录"); clicked => { root.show-history(); } }
+                            Button { text: I18n.text("打开记录目录"); clicked => { root.reveal-history(); } }
+                        }
+                        Label { text: I18n.text("在内容列表勾选项目后可备份或回收。备份保存到游戏目录之外；回收站内容通过 Windows 回收站还原。批量操作逐项提交，取消后已完成项保留。"); wrap: word-wrap; }
+                        history-scroll := ScrollView { vertical-stretch: 1; content-width: self.visible-width; Text { width: history-scroll.visible-width; text: root.operation-history; color: Theme.shade(#b6c2d1, #344557); wrap: word-wrap; } }
+                    }
+                    if root.page == 8 : settings-scroll := ScrollView {
+                        content-width: self.visible-width;
+                        VerticalLayout { width: settings-scroll.visible-width;
+                        spacing: 10px;
+                        Text { text: I18n.text("目录与启动器设置"); color: Theme.shade(#f1f5fa, #182532); font-size: 24px; }
+                        HorizontalLayout {
+                            Label { text: I18n.text("界面语言"); }
+                            language-choice := ComboBox { model: ["中文", "English"]; current-index: root.english ? 1 : 0; selected(_) => { root.english = language-choice.current-index == 1; root.appearance-changed(); } }
+                            Label { text: I18n.text("界面主题"); }
+                            theme-choice := ComboBox { model: [I18n.text("深色"),I18n.text("浅色")]; current-index: root.light-theme ? 1 : 0; selected(_) => { root.light-theme = theme-choice.current-index == 1; root.appearance-changed(); } }
+                        }
+                        HorizontalLayout {
+                            Button { text: I18n.text("添加 Minecraft 根目录"); enabled: !root.scanning; clicked => { root.add-source(0); } }
+                            Button { text: I18n.text("添加自定义游戏目录"); enabled: !root.scanning; clicked => { root.add-source(1); } }
+                            Button { text: I18n.text("添加启动器"); clicked => { root.edit-launcher(""); } }
+                            Button { text: I18n.text("关于"); clicked => { root.about-visible = true; } }
+                        }
+                        Label { text: I18n.text("移除目录仅删除本程序的索引关联；数据与缓存位于 Windows LocalAppData。"); }
+                        CheckBox { text: I18n.text("监控目录变化并自动更新大小"); checked <=> root.watch-enabled; toggled => { root.watch-changed(); } }
+                        HorizontalLayout {
+                            Label { text: I18n.text("添加自定义游戏目录时，归属此根目录："); }
                             ComboBox { model: root.root-labels; current-index <=> root.custom-root-index; }
                         }
                         ListView { height: 150px;
-                            for source in root.sources : Rectangle { height: 49px; background: #1c2532;
+                            for source in root.sources : Rectangle { height: 49px; background: Theme.shade(#1c2532, #ffffff);
                                 HorizontalLayout { padding: 8px; spacing: 8px;
                                     Label { text: source.label + "  ·  " + source.path; horizontal-stretch: 1; }
-                                    Button { text: "移除"; enabled: !root.scanning; clicked => { root.remove-source(source.path); } }
+                                    Button { text: I18n.text("移除"); enabled: !root.scanning; clicked => { root.remove-source(source.path); } }
                                 }
                             }
                         }
-                        Label { text: "启动器安装（可添加多个副本；EXE 或 HMCL JAR + Java）"; }
+                        Label { text: I18n.text("启动器安装（可添加多个副本；EXE 或 HMCL JAR + Java）"); }
                         ListView { height: 120px;
-                            for launcher in root.launchers : Rectangle { height: 49px; background: #1c2532;
+                            for launcher in root.launchers : Rectangle { height: 49px; background: Theme.shade(#1c2532, #ffffff);
                                 HorizontalLayout { padding: 8px; spacing: 8px;
                                     Label { text: launcher.label + "  ·  " + launcher.path; horizontal-stretch: 1; }
-                                    Button { text: "编辑"; clicked => { root.edit-launcher(launcher.id); } }
-                                    Button { text: "移除"; clicked => { root.remove-launcher(launcher.id); } }
+                                    Button { text: I18n.text("编辑"); clicked => { root.edit-launcher(launcher.id); } }
+                                    Button { text: I18n.text("移除"); clicked => { root.remove-launcher(launcher.id); } }
                                 }
                             }
                         }
                         HorizontalLayout {
                             ComboBox { model: root.launcher-labels; current-index <=> root.launcher-index; }
-                            Button { text: "设为全局默认启动器"; clicked => { root.set-global-default(); } }
+                            Button { text: I18n.text("设为全局默认启动器"); clicked => { root.set-global-default(); } }
                         }
-                        Label { text: "扫描诊断 / 能力说明"; }
-                        diagnostics-scroll := ScrollView { vertical-stretch: 1; content-width: self.visible-width; Text { width: diagnostics-scroll.visible-width; text: root.diagnostics; color: #aebbc9; wrap: word-wrap; font-size: 12px; horizontal-alignment: left; vertical-alignment: top; } }
-                        Label { text: "Made with Slint · https://slint.dev · 本阶段不修改游戏文件"; font-size: 11px; }
+                        Label { text: I18n.text("扫描诊断 / 能力说明"); }
+                        diagnostics-scroll := ScrollView { height: 160px; content-width: self.visible-width; Text { width: diagnostics-scroll.visible-width; text: root.diagnostics; color: Theme.shade(#aebbc9, #344557); wrap: word-wrap; font-size: 12px; horizontal-alignment: left; vertical-alignment: top; } }
+                        Label { text: I18n.text("Made with Slint · https://slint.dev · 文件操作须预览并确认"); font-size: 11px; }
+                        }
                     }
                 }
             }
             Rectangle { height: 3px; background: #26323b;
                 Rectangle { width: parent.width * root.progress; height: 3px; background: #63d8a0; }
             }
-            Rectangle { height: 34px; background: #181f2a;
+            Rectangle { height: 34px; background: Theme.shade(#181f2a, #e4eaf2);
                 Label { x: 16px; width: parent.width - 32px; height: parent.height; vertical-alignment: center; text: root.status; }
+            }
+        }
+    }
+    if root.operation-visible : Rectangle {
+        background: #000b;
+        TouchArea {}
+        Rectangle { width: 780px; height: parent.height - 64px; x: (parent.width - self.width)/2; y: 32px; background: Theme.shade(#202b3a, #f8fafc); border-radius: 9px;
+            VerticalLayout { padding: 22px; spacing: 12px;
+                Text { text: root.operation-action == 0 ? I18n.text("重命名") : root.operation-action == 1 ? I18n.text("复制") : root.operation-action == 2 ? I18n.text("移动") : root.operation-action == 3 ? I18n.text("备份") : root.operation-action == 4 ? I18n.text("移入 Windows 回收站") : I18n.text("从备份恢复"); color: Theme.shade(#ffffff, #182532); font-size: 22px; }
+                if root.operation-action == 0 : LineEdit { text <=> root.operation-name; placeholder-text: I18n.text("新文件夹名 / 保留扩展名的新文件名"); enabled: !root.scanning; }
+                if root.operation-action == 5 : HorizontalLayout {
+                    LineEdit { text <=> root.operation-backup; placeholder-text: I18n.text("本程序生成的目录备份"); enabled: !root.scanning; }
+                    Button { text: I18n.text("选择备份"); enabled: !root.scanning; clicked => { root.browse-operation(1); } }
+                }
+                if root.operation-action != 0 && root.operation-action != 4 : HorizontalLayout {
+                    LineEdit { text <=> root.operation-parent; placeholder-text: root.operation-action == 3 ? I18n.text("游戏目录之外的备份父目录") : I18n.text("已添加游戏目录内对应的内容父目录，例如 saves"); enabled: !root.scanning; }
+                    Button { text: I18n.text("选择目标"); enabled: !root.scanning; clicked => { root.browse-operation(0); } }
+                }
+                if root.operation-action != 4 : ComboBox { model: [I18n.text("遇到重名则停止，不覆盖"), I18n.text("自动加序号，保留两份")]; current-index <=> root.operation-conflict; enabled: !root.scanning; }
+                if root.operation-action == 4 : ComboBox { model: [I18n.text("版本：仅版本 JSON 与配套 JAR"), I18n.text("版本：整个已确认的独立实例目录（含存档）")]; current-index <=> root.operation-version-scope; enabled: !root.scanning; }
+                Label { text: I18n.text("预览将核对实际文件与完整哈希。确认后源内容变化会中止；运行中的存档和受保护路径不可操作。回收站不可用时中止。"); wrap: word-wrap; }
+                operation-scroll := ScrollView { vertical-stretch: 1; content-width: self.visible-width; Text { width: operation-scroll.visible-width; text: root.operation-preview; color: Theme.shade(#d0d9e4, #344557); wrap: word-wrap; } }
+                CheckBox { text: I18n.text("我已核对真实路径及操作范围，确认执行"); checked <=> root.operation-confirmed; enabled: root.operation-ready && !root.scanning; }
+                HorizontalLayout {
+                    Button { text: I18n.text("生成 / 更新预览"); enabled: !root.scanning; clicked => { root.prepare-operation(); } }
+                    Button { text: I18n.text("确认执行"); enabled: root.operation-ready && root.operation-confirmed && !root.scanning; clicked => { root.confirm-operation(); } }
+                    Button { text: root.scanning ? I18n.text("取消未完成部分") : I18n.text("关闭"); clicked => { root.dismiss-operation(); } }
+                }
             }
         }
     }
     if root.mapping-visible : Rectangle {
         background: #0009;
         TouchArea { }
-        Rectangle { width: 680px; height: 355px; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; background: #202b3a; border-radius: 9px;
+        Rectangle { width: 680px; height: 510px; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; background: Theme.shade(#202b3a, #f8fafc); border-radius: 9px;
             VerticalLayout { padding: 22px; spacing: 12px;
-                Text { text: "关联所选条目 / 设置默认启动器"; color: white; font-size: 21px; }
-                Label { text: "手动映射保留真实游戏目录、根目录和具体版本 ID。共享存档请明确选择版本。"; wrap: word-wrap; }
+                Text { text: I18n.text("关联所选条目 / 设置默认启动器"); color: Theme.shade(#ffffff, #182532); font-size: 21px; }
+                Label { text: I18n.text("手动映射保留真实游戏目录、根目录和具体版本 ID。共享存档请明确选择版本。"); wrap: word-wrap; }
                 ComboBox { model: root.launcher-labels; current-index <=> root.launcher-index; }
-                ComboBox { model: root.version-labels; current-index <=> root.version-index; }
+                ComboBox { model: root.version-labels; current-index <=> root.version-index; selected(_) => { root.mapping-target-changed(); } }
                 ComboBox { model: root.game-labels; current-index <=> root.mapping-game-index; }
-                Label { text: "当前能力为 OpenOnly：映射不会开启未经真实测试的直接启动。"; }
+                Label { text: I18n.text("可选：绑定启动器为这个版本导出的 BAT / CMD。留空时只打开启动器。"); wrap: word-wrap; }
                 HorizontalLayout {
-                    Button { text: "保存关联"; clicked => { root.save-mapping(); } }
-                    Button { text: "清除关联"; clicked => { root.clear-mapping(); } }
-                    Button { text: "关闭"; clicked => { root.mapping-visible = false; } }
+                    LineEdit { text <=> root.mapping-script; placeholder-text: I18n.text("该版本的启动脚本路径"); }
+                    Button { text: I18n.text("选择脚本"); clicked => { root.browse-editor(3); } }
+                }
+                HorizontalLayout {
+                    LineEdit { text <=> root.mapping-script-workdir; placeholder-text: I18n.text("脚本工作目录（默认脚本所在目录）"); }
+                    Button { text: I18n.text("选择工作目录"); clicked => { root.browse-editor(4); } }
+                }
+                Label { text: I18n.text("请确认脚本启动的是上方版本；本程序不读取或更新脚本内的登录信息。"); wrap: word-wrap; }
+                HorizontalLayout {
+                    Button { text: I18n.text("保存关联"); clicked => { root.save-mapping(); } }
+                    Button { text: I18n.text("清除关联"); clicked => { root.clear-mapping(); } }
+                    Button { text: I18n.text("关闭"); clicked => { root.mapping-visible = false; } }
                 }
             }
         }
@@ -326,28 +555,28 @@ export component AppWindow inherits Window {
     if root.editor-visible : Rectangle {
         background: #0009;
         TouchArea { }
-        Rectangle { width: 730px; height: 460px; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; background: #202b3a; border-radius: 9px;
+        Rectangle { width: 730px; height: 460px; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; background: Theme.shade(#202b3a, #f8fafc); border-radius: 9px;
             VerticalLayout { padding: 22px; spacing: 12px;
-                Text { text: "启动器安装"; color: white; font-size: 21px; }
+                Text { text: I18n.text("启动器安装"); color: Theme.shade(#ffffff, #182532); font-size: 21px; }
                 ComboBox { model: ["PCL2", "HMCL", "PCL CE"]; current-index <=> root.edit-kind; }
                 HorizontalLayout {
-                    LineEdit { text <=> root.edit-executable; placeholder-text: "启动器 EXE / HMCL JAR 的绝对路径"; }
-                    Button { text: "选择文件"; clicked => { root.browse-editor(0); } }
+                    LineEdit { text <=> root.edit-executable; placeholder-text: I18n.text("启动器 EXE / HMCL JAR 的绝对路径"); }
+                    Button { text: I18n.text("选择文件"); clicked => { root.browse-editor(0); } }
                 }
                 HorizontalLayout {
-                    LineEdit { text <=> root.edit-workdir; placeholder-text: "工作目录（通常为启动器所在目录）"; }
-                    Button { text: "选择目录"; clicked => { root.browse-editor(1); } }
+                    LineEdit { text <=> root.edit-workdir; placeholder-text: I18n.text("工作目录（通常为启动器所在目录）"); }
+                    Button { text: I18n.text("选择目录"); clicked => { root.browse-editor(1); } }
                 }
                 HorizontalLayout {
-                    LineEdit { text <=> root.edit-java; placeholder-text: "HMCL JAR 使用的 java.exe / javaw.exe"; }
-                    Button { text: "选择 Java"; clicked => { root.browse-editor(2); } }
+                    LineEdit { text <=> root.edit-java; placeholder-text: I18n.text("HMCL JAR 使用的 java.exe / javaw.exe"); }
+                    Button { text: I18n.text("选择 Java"); clicked => { root.browse-editor(2); } }
                 }
-                Label { text: "关联 Minecraft 根目录（不会更改启动器自身的配置）"; }
+                Label { text: I18n.text("关联 Minecraft 根目录（不会更改启动器自身的配置）"); }
                 ComboBox { model: root.root-labels; current-index <=> root.edit-root-index; }
-                Label { text: "验证文件和工作目录后保存。打开启动器不会自动选择或启动版本。"; wrap: word-wrap; }
+                Label { text: I18n.text("验证文件和工作目录后保存。打开启动器不会自动选择或启动版本。"); wrap: word-wrap; }
                 HorizontalLayout {
-                    Button { text: "验证并保存"; clicked => { root.save-launcher(); } }
-                    Button { text: "关闭"; clicked => { root.editor-visible = false; } }
+                    Button { text: I18n.text("验证并保存"); clicked => { root.save-launcher(); } }
+                    Button { text: I18n.text("关闭"); clicked => { root.editor-visible = false; } }
                 }
             }
         }
@@ -355,12 +584,14 @@ export component AppWindow inherits Window {
     if root.about-visible : Rectangle {
         background: #0009;
         TouchArea { }
-        Rectangle { width: 440px; height: 320px; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; background: #202b3a; border-radius: 9px;
+        Rectangle { width: 440px; height: 390px; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; background: Theme.shade(#202b3a, #f8fafc); border-radius: 9px;
             VerticalLayout { padding: 22px; spacing: 12px;
-                Text { text: "Minecraft Explorer 0.2.0"; color: white; font-size: 21px; }
-                Label { text: "本地内容与实例索引 · 阶段 2"; }
+                Text { text: "Minecraft Explorer 1.0.0"; color: Theme.shade(#ffffff, #182532); font-size: 21px; }
+                Label { text: I18n.text("本地内容与安全文件管理"); }
                 AboutSlint { }
-                Button { text: "关闭"; clicked => { root.about-visible = false; } }
+                Label { text: I18n.text("许可原文已嵌入程序；导出后在资源管理器中双击查看。"); wrap: word-wrap; }
+                Button { text: I18n.text("导出第三方许可"); clicked => { root.export-licenses(); } }
+                Button { text: I18n.text("关闭"); clicked => { root.about-visible = false; } }
             }
         }
     }

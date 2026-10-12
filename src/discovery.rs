@@ -59,7 +59,7 @@ pub fn children(path: &Path, warnings: &mut Vec<String>) -> Vec<PathBuf> {
                 match entry {
                     Ok(entry) => {
                         let path = entry.path();
-                        match fs::symlink_metadata(&path) {
+                        match entry.metadata() {
                             Ok(meta) if !is_link(&meta) => result.push(path),
                             Ok(_) => warnings
                                 .push(format!("跳过链接 / 重解析点：{}", display_path(&path))),
@@ -83,7 +83,7 @@ pub fn discover(settings: &Settings, cancel: &AtomicBool) -> Discovery {
     let mut out = Discovery::default();
     let mut seen_games = HashSet::new();
     let mut seen_versions = HashSet::new();
-    // Roots first: explicit custom aliases cannot change an already established owner.
+    // 先处理根目录，自定义别名不能改变已确认的归属。
     let mut sources = settings.sources.clone();
     sources.sort_by_key(|s| if s.kind == SourceKind::Root { 0 } else { 1 });
     for source in &sources {
@@ -210,7 +210,7 @@ pub fn discover(settings: &Settings, cancel: &AtomicBool) -> Discovery {
                     }
                 }
             }
-            // Project only non-authentication fields. Never deserialize accounts/tokens.
+            // 仅提取非认证字段，不反序列化账号或令牌。
             let profile = path.join("launcher_profiles.json");
             if profile.exists() {
                 match read_bounded(&profile, 4 * 1024 * 1024)
@@ -283,12 +283,12 @@ pub fn discover(settings: &Settings, cancel: &AtomicBool) -> Discovery {
             }
             let before = out.warnings.len();
             let worlds = children(&saves, &mut out.warnings);
-            // Inaccessible saves must not prune previously indexed worlds.
+            // 无法访问 saves 时，不清除之前索引的世界。
             if out.warnings.len() > before && fs::read_dir(&saves).is_err() {
                 out.failed_sources.push(source_key.clone());
             }
             for world in worlds {
-                if !world.is_dir() {
+                if !world.is_dir() || folder_name(&world).starts_with(".minecraft-explorer-") {
                     continue;
                 }
                 let mut item = base_item(
@@ -356,6 +356,9 @@ fn discover_content(
         if cancel.load(Ordering::Relaxed) {
             break;
         }
+        if folder_name(&path).starts_with(".minecraft-explorer-") {
+            continue;
+        }
         let extension = path
             .extension()
             .unwrap_or_default()
@@ -369,6 +372,24 @@ fn discover_content(
             };
         if !accepted {
             continue;
+        }
+        if kind == ItemKind::DataPack {
+            match crate::content::is_data_pack(&path) {
+                Ok(true) => (),
+                Ok(false) => continue,
+                Err(e) => {
+                    out.warnings
+                        .push(format!("数据包结构无法验证 {}：{e}", display_path(&path)));
+                    // 候选暂时不可读时，保留旧索引。
+                    if !path.is_file()
+                        || e.downcast_ref::<std::io::Error>()
+                            .is_some_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied)
+                    {
+                        out.failed_sources.push(source.into());
+                    }
+                    continue;
+                }
+            }
         }
         let mut item = base_item(kind.clone(), path, root.to_path_buf(), source.into());
         item.game_dir = Some(game.into());

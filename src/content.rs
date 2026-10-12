@@ -1,5 +1,5 @@
-//! Bounded, read-only metadata and PNG previews for local Minecraft content.
-//! Archives are never extracted, and declared compatibility is not evaluated.
+//! 以有界、只读方式读取本地 Minecraft 内容元信息与 PNG 预览。
+//! 不解压归档，不推断声明的兼容性是否实际成立。
 
 use crate::{
     models::{ContentMetadata, ItemKind},
@@ -25,11 +25,11 @@ const MAX_RECORDS: usize = 256;
 pub struct ContentMetadataReport {
     pub metadata: ContentMetadata,
     pub status: String,
-    /// Present only when a metadata file explicitly declares a display name.
+    /// 仅在元信息文件明确声明显示名称时提供。
     pub display_name: Option<String>,
 }
 
-/// Parse only recognized metadata files. A bad archive remains a listable item.
+/// 仅解析已识别的元信息；损坏归档仍保留在列表中。
 pub fn metadata(path: &Path, kind: &ItemKind) -> ContentMetadataReport {
     match ContentReader::open(path, METADATA_BUDGET) {
         Ok(mut reader) => parse(&mut reader, kind),
@@ -41,8 +41,28 @@ pub fn metadata(path: &Path, kind: &ItemKind) -> ContentMetadataReport {
     }
 }
 
-/// Return a small PNG from the pack root or an explicitly declared mod icon.
-/// This does not create a cache file or follow links inside directory packs.
+/// 数据包必须包含根级元信息文件和 data 目录。
+/// ZIP 工具常省略目录记录，因此安全的 data/... 条目
+/// 也能证明 data 目录存在；不搜索嵌套的包根目录。
+pub fn is_data_pack(path: &Path) -> Result<bool> {
+    let mut reader = ContentReader::open(path, ENTRY_LIMIT)?;
+    if reader.read("pack.mcmeta", ENTRY_LIMIT)?.is_none() {
+        return Ok(false);
+    }
+    Ok(match &reader.container {
+        Container::Directory(root) => match fs::symlink_metadata(root.join("data")) {
+            Ok(_) => checked_path(&root.join("data"))?.is_dir(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+            Err(e) => return Err(e.into()),
+        },
+        Container::Archive(archive) => archive
+            .file_names()
+            .any(|name| name == "data/" || name.starts_with("data/")),
+    })
+}
+
+/// 读取包根目录的小 PNG 或模组明确声明的图标。
+/// 不创建缓存文件，不跟随目录包中的链接。
 pub fn preview(path: &Path, kind: &ItemKind) -> Option<Vec<u8>> {
     let mut reader = ContentReader::open(path, METADATA_BUDGET + ICON_LIMIT).ok()?;
     let report = parse(&mut reader, kind);
@@ -180,8 +200,8 @@ fn u64_le(bytes: &[u8], offset: usize) -> u64 {
     u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap())
 }
 
-/// ZipArchive merges duplicate names and trusts the advertised entry count when
-/// allocating its index. Validate the bounded central directory before using it.
+/// ZipArchive 会合并同名条目，并按声明的条目数
+/// 分配索引；使用前先在预算内验证中央目录。
 fn inspect_directory(file: &mut File) -> Result<()> {
     let file_size = file.metadata()?.len();
     let tail_size = file_size.min(65535 + 22);
@@ -573,8 +593,8 @@ fn parse_fabric(bytes: &[u8], collected: &mut Collected) -> Result<()> {
                 }
             }
         }
-        // Fabric dependency ranges are displayed verbatim, never treated as a
-        // successful compatibility or dependency-resolution check.
+        // Fabric 依赖范围按声明原样显示，不能当作
+        // 已经通过兼容性或依赖解析验证。
         if let Some(depends) = record.get("depends").and_then(Value::as_object) {
             for field in ["minecraft", "fabricloader", "java"] {
                 if let Some(value) = depends.get(field) {

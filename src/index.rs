@@ -91,7 +91,7 @@ impl Index {
             content
         )
         .to_lowercase();
-        // User annotations live in separate tables and cannot be replaced by a refresh.
+        // 用户注释独立存表，不会被扫描刷新覆盖。
         let mut scanned = item.clone();
         scanned.favorite = false;
         scanned.tags.clear();
@@ -149,6 +149,69 @@ impl Index {
         Ok(())
     }
 
+    /// 物理重命名或移动时同步注释，包括世界内部的数据包。
+    /// 合并目标的历史注释，避免覆盖。
+    pub fn relocate_annotations(&self, old: &Path, new: &Path) -> Result<()> {
+        let items = self.query(&Query::default())?;
+        let old_key = crate::platform::path_key(old);
+        let transaction = self.connection.unchecked_transaction()?;
+        for item in items {
+            let key = crate::platform::path_key(&item.path);
+            if key != old_key && !key.starts_with(&(old_key.clone() + "\\")) {
+                continue;
+            }
+            let relative = item.path.strip_prefix(old).unwrap_or(Path::new(""));
+            let target = if relative.as_os_str().is_empty() {
+                new.to_path_buf()
+            } else {
+                new.join(relative)
+            };
+            let id = format!(
+                "{}:{}",
+                item.kind.as_str(),
+                crate::platform::path_key(&target)
+            );
+            if id == item.id {
+                continue;
+            }
+            let existing: Option<(bool, String, Option<i64>)> = transaction
+                .query_row(
+                    "SELECT favorite,tags_json,last_opened_ms FROM annotations WHERE item_id=?1",
+                    [&id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()?;
+            let mut tags = item.tags.clone();
+            let mut seen = tags
+                .iter()
+                .map(|t| t.to_lowercase())
+                .collect::<HashSet<_>>();
+            let mut favorite = item.favorite;
+            let mut recent = item.last_opened_ms;
+            if let Some((old_favorite, old_tags, old_recent)) = existing {
+                favorite |= old_favorite;
+                recent = recent.max(old_recent);
+                for tag in serde_json::from_str::<Vec<String>>(&old_tags)? {
+                    if seen.insert(tag.to_lowercase()) {
+                        tags.push(tag);
+                    }
+                }
+            }
+            transaction.execute("INSERT INTO annotations(item_id,favorite,tags_json,search,last_opened_ms) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(item_id) DO UPDATE SET favorite=excluded.favorite,tags_json=excluded.tags_json,search=excluded.search,last_opened_ms=excluded.last_opened_ms",params![id,favorite,serde_json::to_string(&tags)?,tags.join(" ").to_lowercase(),recent])?;
+            transaction.execute("DELETE FROM annotation_tags WHERE item_id=?1", [&id])?;
+            for tag in &tags {
+                transaction.execute(
+                    "INSERT INTO annotation_tags(item_id,tag,tag_key) VALUES(?1,?2,?3)",
+                    params![id, tag, tag.to_lowercase()],
+                )?;
+            }
+            transaction.execute("DELETE FROM annotation_tags WHERE item_id=?1", [&item.id])?;
+            transaction.execute("DELETE FROM annotations WHERE item_id=?1", [&item.id])?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
     fn require_item(&self, id: &str) -> Result<()> {
         let exists: bool = self.connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM items WHERE id=?1)",
@@ -170,7 +233,7 @@ impl Index {
     }
 
     pub fn discovered(&mut self, items: &[Item], generation: i64) -> Result<()> {
-        // Existing cache stays visible during refresh; only new items start with unknown sizes.
+        // 刷新时保留旧缓存可见；仅新条目的大小从未知开始。
         self.connection.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| -> Result<()> {
             for item in items {
@@ -225,7 +288,7 @@ impl Index {
         for id in ids {
             transaction.execute("DELETE FROM items WHERE id=?1", [id])?;
         }
-        // Keep annotations so a restored file at the same indexed path retains its labels.
+        // 保留注释，使同路径恢复的文件仍有原标签。
         transaction.commit()?;
         Ok(())
     }
@@ -244,7 +307,7 @@ impl Index {
     }
 
     pub fn query(&self, query: &Query) -> Result<Vec<Item>> {
-        // Escape LIKE metacharacters: '%' and '_' typed by users remain literal.
+        // 转义 LIKE 通配符，用户输入的 % 和 _ 按字面值匹配。
         let term = query
             .text
             .to_lowercase()

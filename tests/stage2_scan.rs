@@ -310,7 +310,7 @@ fn unpacked_packs_and_archive_files_use_actual_logical_file_sizes() {
 }
 
 #[test]
-fn incremental_change_updates_one_leaf_and_invalidates_only_its_instance_total() {
+fn incremental_change_updates_one_leaf_and_recomputes_only_its_instance_total() {
     let fixture = tempfile::tempdir().unwrap();
     let game = fixture.path().join("Minecraft");
     let a = game.join("mods/a.jar");
@@ -338,14 +338,24 @@ fn incremental_change_updates_one_leaf_and_invalidates_only_its_instance_total()
         },
     );
     assert!(!refresh.scan.cancelled);
-    assert_eq!(refresh.scan.items.len(), 1);
+    assert_eq!(refresh.scan.items.len(), 2);
     let changed = at(&refresh.scan.items, &a);
     assert_eq!(changed.name, "明确的新名称");
     assert_eq!(changed.size, Some(fs::metadata(&a).unwrap().len()));
-    assert_eq!(updated.as_slice(), std::slice::from_ref(&changed.id));
-    assert_eq!(refresh.invalidated.len(), 1);
-    assert_eq!(refresh.invalidated[0].path, checked_path(&game).unwrap());
-    assert!(refresh.invalidated[0].size.is_none() && !refresh.invalidated[0].size_complete);
+    assert_eq!(updated.len(), 2);
+    assert!(updated.contains(&changed.id));
+    assert!(updated.contains(&at(&refresh.scan.items, &game).id));
+    assert!(refresh.invalidated.is_empty());
+    let aggregate = at(&refresh.scan.items, &game);
+    assert!(aggregate.size.is_some() && aggregate.size_complete);
+    assert_eq!(
+        aggregate.size,
+        Some(
+            scanner::directory_size(&game, &ItemKind::Instance, true, &AtomicBool::new(false))
+                .unwrap()
+                .0
+        )
+    );
     assert!(refresh.removed_ids.is_empty());
     apply_refresh(&index, &refresh, 2);
     let stored_b = index.get(&unchanged.id).unwrap().unwrap();
@@ -356,13 +366,9 @@ fn incremental_change_updates_one_leaf_and_invalidates_only_its_instance_total()
         index.get(&original_world.id).unwrap().unwrap().size,
         original_world.size
     );
-    assert!(
-        index
-            .get(&refresh.invalidated[0].id)
-            .unwrap()
-            .unwrap()
-            .size
-            .is_none()
+    assert_eq!(
+        index.get(&aggregate.id).unwrap().unwrap().size,
+        aggregate.size
     );
 }
 
@@ -386,7 +392,7 @@ fn incremental_create_rename_and_delete_remove_only_confirmed_content_paths() {
         |_| {},
     );
     assert!(added.removed_ids.is_empty());
-    assert_eq!(added.scan.items.len(), 1);
+    assert_eq!(added.scan.items.len(), 2);
     let added_id = at(&added.scan.items, &created).id.clone();
     apply_refresh(&index, &added, 2);
 
@@ -420,7 +426,9 @@ fn incremental_create_rename_and_delete_remove_only_confirmed_content_paths() {
         deleted.removed_ids.as_slice(),
         std::slice::from_ref(&renamed_id)
     );
-    assert!(deleted.scan.items.is_empty());
+    assert_eq!(deleted.scan.items.len(), 1);
+    assert_eq!(deleted.scan.items[0].kind, ItemKind::Instance);
+    assert!(deleted.scan.items[0].size.is_some());
     apply_refresh(&index, &deleted, 4);
     assert!(index.get(&renamed_id).unwrap().is_none());
     assert_eq!(index.stats().unwrap().mods, 1);
@@ -467,7 +475,7 @@ fn cancelling_after_discovery_preserves_existing_cached_items_and_sizes() {
     assert!(refresh.scan.cancelled);
     assert_eq!(updates, 0);
     assert!(refresh.scan.items.is_empty());
-    // Cleanup candidates are advisory: the worker must skip them for a cancelled report.
+    // 清理候选仅为建议，任务取消后必须跳过它们。
     assert!(
         refresh
             .removed_ids
@@ -633,7 +641,7 @@ fn world_and_directory_pack_preview_timestamps_change_when_only_icons_change() {
         &AtomicBool::new(false),
         |_| {},
     );
-    assert_eq!(refreshed.scan.items.len(), 2);
+    assert_eq!(refreshed.scan.items.len(), 3);
     for (path, icon) in [(&world_path, &world_icon), (&pack_path, &pack_icon)] {
         let item = at(&refreshed.scan.items, path);
         assert_eq!(item.preview_modified_ms, modified_ms(icon));

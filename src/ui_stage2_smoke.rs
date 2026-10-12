@@ -1,5 +1,5 @@
-//! Opt-in stage 2 native-window integration checks over an isolated fixture.
-//! Native events target this Slint window only; no OS input or launcher is sent.
+//! 显式启用的阶段 2 原生窗口测试，仅使用隔离数据。
+//! 原生事件仅针对当前 Slint 窗口，不发送系统输入或打开启动器。
 use crate::AppWindow;
 use anyhow::{Context, Result, bail, ensure};
 use slint::{
@@ -43,7 +43,7 @@ fn click(ui: &AppWindow, position: LogicalPosition) {
     });
 }
 
-fn snapshot(ui: &AppWindow, output: &Path, name: &str) -> Result<()> {
+pub(crate) fn snapshot(ui: &AppWindow, output: &Path, name: &str) -> Result<()> {
     let pixels = ui
         .window()
         .take_snapshot()
@@ -59,8 +59,8 @@ fn snapshot(ui: &AppWindow, output: &Path, name: &str) -> Result<()> {
 }
 
 fn native_search(ui: &AppWindow, value: &str) -> Result<()> {
-    // Only the stable top search row needs a logical position. List selection
-    // below finds the rendered row, so extra filter rows do not shift its target.
+    // 仅稳定的顶部搜索栏使用固定逻辑坐标；列表选择
+    // 通过实际绘制的行定位，避免新增筛选栏使点击目标偏移。
     let width = ui.window().size().width as f32 / ui.window().scale_factor();
     click(ui, LogicalPosition::new(width * 0.4, 34.));
     for ch in value.chars() {
@@ -77,7 +77,7 @@ fn native_search(ui: &AppWindow, value: &str) -> Result<()> {
     Ok(())
 }
 
-fn native_select_first(ui: &AppWindow) -> Result<()> {
+pub(crate) fn native_select_first(ui: &AppWindow) -> Result<()> {
     let expected = ui.get_entries().row_data(0).context("no first row")?.id;
     ui.window().dispatch_event(WindowEvent::PointerMoved {
         position: LogicalPosition::new(0., 0.),
@@ -88,7 +88,12 @@ fn native_select_first(ui: &AppWindow) -> Result<()> {
     let mut target = None;
     for y in 80..pixels.height() {
         let pixel = pixels.as_slice()[(y * pixels.width() + x) as usize];
-        let row_background = (pixel.r, pixel.g, pixel.b) == (0x17, 0x1f, 0x2a);
+        let row_background = (pixel.r, pixel.g, pixel.b)
+            == if ui.get_light_theme() {
+                (255, 255, 255)
+            } else {
+                (0x17, 0x1f, 0x2a)
+            };
         if row_background {
             let first = *run_start.get_or_insert(y);
             if y - first >= 24 {
@@ -515,6 +520,47 @@ impl Run {
                 }
                 self.capture(ui, "final-favorite")?;
                 self.checks.push("annotation_readback_after_refresh".into());
+                ui.invoke_begin_mapping();
+                ui.set_mapping_script(
+                    self.output
+                        .join("chosen & (fixture).cmd")
+                        .to_string_lossy()
+                        .as_ref()
+                        .into(),
+                );
+                ui.set_mapping_script_workdir(self.output.to_string_lossy().as_ref().into());
+                fs::write(
+                    self.output.join("chosen & (fixture).cmd"),
+                    "@echo off\r\n>script-ran.marker echo chosen-fixture\r\nexit /b 0\r\n",
+                )?;
+                self.capture(ui, "script-binding")?;
+                ui.invoke_save_mapping();
+                self.advance("script_mapping_dialog_and_save");
+            }
+            26 => {
+                if ui.get_mapping_visible() || !ui.get_can_launch_script() {
+                    return Ok(false);
+                }
+                ui.invoke_begin_mapping();
+                ensure!(
+                    ui.get_mapping_script().contains("chosen & (fixture).cmd"),
+                    "saved script path missing"
+                );
+                ui.set_mapping_visible(false);
+                ui.invoke_launch_script();
+                self.advance("script_mapping_readback_and_launch_callback");
+            }
+            27 => {
+                if !self.output.join("script-ran.marker").exists() {
+                    return Ok(false);
+                }
+                ensure!(
+                    fs::read_to_string(self.output.join("script-ran.marker"))?.trim()
+                        == "chosen-fixture"
+                );
+                self.checks.push(
+                    "generated_script_executed_in_selected_workdir_without_opening_launcher".into(),
+                );
                 return Ok(true);
             }
             _ => bail!("unexpected stage {}", self.stage),
@@ -535,6 +581,17 @@ impl Run {
                 ensure!(
                     self.ce_saved()?,
                     "PCL CE installation missing after app restart"
+                );
+                ensure!(
+                    minecraft_explorer::index::Index::open(&self.fixture.cache.join("index.db"))?
+                        .load_settings()?
+                        .mappings
+                        .iter()
+                        .any(|m| m
+                            .script
+                            .as_ref()
+                            .is_some_and(|s| s.path.ends_with("chosen & (fixture).cmd"))),
+                    "script binding missing after restart"
                 );
                 navigate(ui, 10);
                 self.advance("restart_database_state");

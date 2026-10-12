@@ -1,7 +1,7 @@
-param([string]$Python = 'python', [string]$Executable = '')
+param([string]$Python = 'python', [string]$Executable = '', [string]$OutputDirectory = '')
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$distribution = Join-Path $projectRoot 'dist\MinecraftExplorer'
+$distribution = if ($OutputDirectory) { [System.IO.Path]::GetFullPath($OutputDirectory) } else { Join-Path $projectRoot 'dist\MinecraftExplorer' }
 New-Item -ItemType Directory -Path $distribution -Force | Out-Null
 $env:CARGO_HOME = Join-Path $projectRoot '.tools\cargo'
 $env:RUSTUP_HOME = Join-Path $projectRoot '.tools\rustup'
@@ -13,8 +13,17 @@ New-Item -ItemType Directory -Path (Split-Path -Parent $metadataPath) -Force | O
 if ($LASTEXITCODE -ne 0) { throw 'Cargo metadata failed' }
 if (!$Executable) { $Executable = Join-Path $projectRoot 'target\release\minecraft-explorer.exe' }
 Copy-Item -LiteralPath $Executable -Destination (Join-Path $distribution 'MinecraftExplorer.exe') -Force
-foreach ($name in @('README.md','ARCHITECTURE.md','TESTING.md','LAUNCHER_RESEARCH.md','DEVELOPMENT.md','THIRD_PARTY.md','LICENSE')) {
+foreach ($name in @('README.md','LICENSE')) {
     Copy-Item -LiteralPath (Join-Path $projectRoot $name) -Destination $distribution -Force
+}
+$distributionDocs = Join-Path $distribution 'docs'
+New-Item -ItemType Directory -Path $distributionDocs -Force | Out-Null
+foreach ($document in (Get-ChildItem -LiteralPath (Join-Path $projectRoot 'docs') -File)) {
+    $legacyDocument = Join-Path $distribution $document.Name
+    if (Test-Path -LiteralPath $legacyDocument -PathType Leaf) {
+        Move-Item -LiteralPath $legacyDocument -Destination (Join-Path $distributionDocs $document.Name) -Force
+    }
+    Copy-Item -LiteralPath $document.FullName -Destination $distributionDocs -Force
 }
 & $Python (Join-Path $PSScriptRoot 'collect_licenses.py') $metadataPath $distribution
 if ($LASTEXITCODE -ne 0) { throw 'License collection failed' }

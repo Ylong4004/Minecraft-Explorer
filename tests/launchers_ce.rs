@@ -183,7 +183,7 @@ fn pcl_ce_process_opens_the_selected_installation_without_invented_arguments() {
     let broken = installation(&root_a, "broken");
     let broken_plan = launcher::adapter(&broken.kind).open_plan(&broken).unwrap();
     assert!(launcher::spawn(&broken_plan).is_err());
-    // Failure must return to the caller; selecting another installation remains a user action.
+    // 将失败返回调用方，改选其他安装仍由用户决定。
     assert!(!ce_a.working_dir.join("arguments.txt").exists());
     assert!(!ce_b.working_dir.join("arguments.txt").exists());
     for selected in [&ce_a, &ce_b] {

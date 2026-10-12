@@ -1,13 +1,14 @@
-use crate::{AppWindow, EntryRow, LauncherRow, SourceRow};
+use crate::{AppWindow, EntryRow, I18n, LauncherRow, SourceRow, SpaceBar, SpaceTile};
 use anyhow::{Context, Result, bail};
 use minecraft_explorer::{
-    content, duplicates,
+    content, duplicates, i18n,
     index::Index,
     launcher,
     models::*,
+    operations::{self, Action, Conflict, Plan, Policy, Report, VersionScope},
     platform::*,
     scanner::{self, ScanEvent},
-    watch,
+    space, watch,
 };
 use slint::{ComponentHandle, Model, ModelRc, SharedString, Timer, TimerMode, VecModel};
 use std::{
@@ -27,25 +28,51 @@ enum Command {
     Query(Query, u64),
     Scan,
     ScanPaths(Vec<PathBuf>),
+    ScanAdded(PathBuf, u64),
     Annotate(String, bool, Vec<String>),
     Watch(bool),
+    Appearance(bool, bool, u64),
+    Analyze(Vec<PathBuf>, u64),
     Duplicates,
     AddSource(SourceKind, Option<PathBuf>),
     RemoveSource(String),
     SaveLauncher(LauncherInstallation),
     RemoveLauncher(String),
-    Map(String, String, String, PathBuf),
+    Map(String, String, String, PathBuf, Option<LaunchScript>),
     ClearMap(String),
     DefaultLauncher(String),
     Open(String, String),
+    LaunchScript(String, String),
     Reveal(String),
+    RevealPath(PathBuf),
+    ExportLicenses,
     Copy(String),
     Detail(String),
     Browse(i32),
+    PrepareOperation(
+        Vec<String>,
+        Action,
+        PathBuf,
+        String,
+        Conflict,
+        VersionScope,
+        PathBuf,
+        String,
+    ),
+    ExecuteOperation(Box<Plan>),
+    OperationComplete(Box<Report>, TaskState),
+    OperationFailed(Vec<PathBuf>, String, TaskState),
+    History,
+    RevealHistory,
+    BrowseOperation(i32),
 }
 
 enum Event {
     Settings(Settings),
+    AppearanceSaved(u64),
+    SourceAdded(PathBuf, u64),
+    Analysis(space::Analysis, u64),
+    SpaceStatus(String, u64),
     View {
         request: u64,
         items: Vec<Item>,
@@ -64,11 +91,18 @@ enum Event {
     SourcesChanged,
     Duplicates(Vec<Item>, String),
     RowIcon(String, String, Option<(Vec<u8>, u32, u32)>),
+    OperationPrepared(Box<Plan>, String),
+    OperationError(String),
+    OperationHistory(String),
+    OperationBrowse(i32, PathBuf),
+    OperationFinished,
 }
 
 #[derive(Default)]
 struct UiState {
     settings: Settings,
+    appearance_request: u64,
+    appearance_pending: bool,
     items: Vec<Item>,
     games: Vec<Item>,
     versions: Vec<Item>,
@@ -82,6 +116,21 @@ struct UiState {
     duplicate_items: Vec<Item>,
     row_model: Rc<VecModel<EntryRow>>,
     row_positions: HashMap<String, usize>,
+    checked: HashSet<String>,
+    operation_ids: Vec<String>,
+    operation_plan: Option<Plan>,
+    operation_signature: String,
+    close_requested: bool,
+    analysis: Option<space::Analysis>,
+    analysis_request: u64,
+    auto_analysis_request: Option<u64>,
+    auto_analysis_path: Option<PathBuf>,
+    assigned_space_index: Option<i32>,
+    space_node: usize,
+    space_parents: Vec<usize>,
+    space_scopes: Vec<Vec<PathBuf>>,
+    raw_status: String,
+    raw_history: String,
 }
 
 #[derive(Default)]
@@ -210,12 +259,15 @@ fn worker(
     commands: mpsc::Receiver<Command>,
     events: mpsc::Sender<Event>,
     cancel: Arc<AtomicBool>,
+    callback: mpsc::Sender<Command>,
+    closing: Arc<AtomicBool>,
 ) {
     let result = (|| -> Result<()> {
         let index = Index::open(&db)?;
         let mut settings = index.load_settings()?;
         let scanning = Arc::new(AtomicBool::new(false));
-        let mut children = Vec::<std::process::Child>::new();
+        let mut children = Vec::<launcher::LauncherProcess>::new();
+        i18n::warm_up();
         let _ = events.send(Event::Settings(settings.clone()));
         let mut monitor = match watch::Monitor::new(Duration::from_millis(900)) {
             Ok(m) => Some(m),
@@ -227,9 +279,13 @@ fn worker(
         let mut watched_paths = Vec::<String>::new();
         let mut pending_paths = Vec::<PathBuf>::new();
         let mut pending_full = false;
+        let mut pending_added = None;
         let mut watch_retry = Instant::now();
         let mut watch_incomplete = false;
         loop {
+            if closing.load(Ordering::SeqCst) && !scanning.load(Ordering::SeqCst) {
+                break;
+            }
             let monitoring = (|| -> Result<()> {
                 if let Some(monitor) = &mut monitor {
                     let mut paths = if settings.watch_enabled {
@@ -287,11 +343,23 @@ fn worker(
                 let _ = events.send(Event::Warning(format!("目录监控已暂停，可手动刷新：{e:#}")));
                 monitor = None;
             }
-            let command = if !scanning.load(Ordering::SeqCst) && pending_full {
+            let command = if !closing.load(Ordering::SeqCst)
+                && !scanning.load(Ordering::SeqCst)
+                && pending_added.is_some()
+            {
+                let (path, request) = pending_added.take().unwrap();
+                Command::ScanAdded(path, request)
+            } else if !closing.load(Ordering::SeqCst)
+                && !scanning.load(Ordering::SeqCst)
+                && pending_full
+            {
                 pending_full = false;
                 pending_paths.clear();
                 Command::Scan
-            } else if !scanning.load(Ordering::SeqCst) && !pending_paths.is_empty() {
+            } else if !closing.load(Ordering::SeqCst)
+                && !scanning.load(Ordering::SeqCst)
+                && !pending_paths.is_empty()
+            {
                 Command::ScanPaths(std::mem::take(&mut pending_paths))
             } else {
                 match commands.recv_timeout(Duration::from_millis(200)) {
@@ -301,8 +369,91 @@ fn worker(
                 }
             };
             children.retain_mut(|child| matches!(child.try_wait(), Ok(None)));
+            let file_request = matches!(
+                &command,
+                Command::PrepareOperation(..)
+                    | Command::ExecuteOperation(..)
+                    | Command::OperationComplete(..)
+                    | Command::OperationFailed(..)
+            );
+            let analysis_request = match &command {
+                Command::Analyze(_, request) | Command::ScanAdded(_, request) => Some(*request),
+                _ => None,
+            };
             let result = (|| -> Result<()> {
+                if closing.load(Ordering::SeqCst)
+                    && matches!(
+                        &command,
+                        Command::PrepareOperation(..)
+                            | Command::ExecuteOperation(..)
+                            | Command::Scan
+                            | Command::ScanPaths(..)
+                            | Command::ScanAdded(..)
+                    )
+                {
+                    bail!("窗口正在关闭，未开始新的任务");
+                }
+                if scanning.load(Ordering::SeqCst)
+                    && matches!(
+                        &command,
+                        Command::SaveLauncher(..)
+                            | Command::RemoveLauncher(..)
+                            | Command::Map(..)
+                            | Command::ClearMap(..)
+                            | Command::DefaultLauncher(..)
+                    )
+                {
+                    bail!("请等待或取消任务后再修改启动器或实例配置");
+                }
                 match command {
+                    Command::Appearance(english, light_theme, request) => {
+                        settings.english = english;
+                        settings.light_theme = light_theme;
+                        index.save_settings(&settings)?;
+                        let _ = events.send(Event::AppearanceSaved(request));
+                    }
+                    Command::Analyze(paths, request) => {
+                        if scanning.swap(true, Ordering::SeqCst) {
+                            let _ = events.send(Event::SpaceStatus(
+                                "当前任务尚未结束，请完成或取消后重新分析".into(),
+                                request,
+                            ));
+                            bail!("请等待或取消当前任务");
+                        }
+                        cancel.store(false, Ordering::SeqCst);
+                        let guard = TaskState {
+                            running: scanning.clone(),
+                            events: events.clone(),
+                        };
+                        let items = index.query(&Query::default())?;
+                        let flag = cancel.clone();
+                        let output = events.clone();
+                        let _ = events.send(Event::Scanning(true));
+                        std::thread::Builder::new()
+                            .name("space-analysis".into())
+                            .spawn(move || {
+                                let _guard = guard;
+                                let started = Instant::now();
+                                let mut updated = Instant::now() - Duration::from_secs(1);
+                                match space::analyze(&paths, &items, &flag, |files| {
+                                    if updated.elapsed() >= Duration::from_millis(250) {
+                                        let _ = output.send(Event::SpaceStatus(format!(
+                                            "空间分析：已读取 {files} 个文件，用时 {seconds} 秒", seconds = started.elapsed().as_secs()
+                                        ), request));
+                                        updated = Instant::now();
+                                    }
+                                }) {
+                                    Ok(tree) => {
+                                        let _ = output.send(Event::Analysis(tree, request));
+                                    }
+                                    Err(error) => {
+                                        let _ = output.send(Event::SpaceStatus(format!(
+                                            "空间分析失败：{error:#}"
+                                        ), request));
+                                    }
+                                }
+                            })?;
+                    }
                     Command::Query(query, request) => {
                         let items = index.query(&query)?;
                         let games = index.query(&Query {
@@ -321,13 +472,27 @@ fn worker(
                             stats: index.stats()?,
                         });
                     }
-                    Command::Scan | Command::ScanPaths(_) => {
+                    Command::Scan | Command::ScanPaths(_) | Command::ScanAdded(..) => {
+                        let auto_analysis = match &command {
+                            Command::ScanAdded(path, request) => Some((path.clone(), *request)),
+                            _ => None,
+                        };
                         let paths = if let Command::ScanPaths(paths) = command {
                             Some(paths)
                         } else {
                             None
                         };
                         let full = paths.is_none();
+                        if cancel.load(Ordering::SeqCst)
+                            && let Some((_, request)) = auto_analysis.as_ref()
+                        {
+                            let _ = events.send(Event::SpaceStatus(
+                                "自动空间分析已取消；目录关联仍保留".into(),
+                                *request,
+                            ));
+                            let _ = events.send(Event::Scanning(false));
+                            return Ok(());
+                        }
                         let cached = if paths.is_some() {
                             index.query(&Query::default())?
                         } else {
@@ -355,6 +520,7 @@ fn worker(
                             .name("scan".into())
                             .spawn(move || {
                                 let _task = task;
+                                let auto_request = auto_analysis.as_ref().map(|(_, request)| *request);
                                 let result = (|| -> Result<bool> {
                                     let mut db = Index::open(&scan_db)?;
                                     let generation = now_ms();
@@ -365,8 +531,27 @@ fn worker(
                                             return;
                                         }
                                         let result = match event {
-                                            ScanEvent::Discovered(items) => {
+                                            ScanEvent::Discovered(items) => (|| -> Result<()> {
+                                                if full {
+                                                    let cached = db.query(&Query {
+                                                        kind: Some(ItemKind::DataPack),
+                                                        ..Default::default()
+                                                    })?;
+                                                    db.remove_items(
+                                                        &scanner::invalid_data_pack_cache(
+                                                            &cached, &items,
+                                                        ),
+                                                    )?;
+                                                }
                                                 db.discovered(&items, generation)
+                                            })(
+                                            ),
+                                            ScanEvent::Metadata(mut item) => {
+                                                if let Ok(Some(old)) = db.get(&item.id) {
+                                                    item.size = old.size;
+                                                    item.size_complete = old.size_complete;
+                                                }
+                                                db.upsert(&item, generation)
                                             }
                                             ScanEvent::Updated(item) => {
                                                 db.upsert(&item, generation)
@@ -442,9 +627,29 @@ fn worker(
                                         )
                                     };
                                     let _ = output.send(Event::Status(status));
+                                    if let Some((path, request)) = auto_analysis {
+                                        if report.cancelled || scan_cancel.load(Ordering::SeqCst) {
+                                            let _ = output.send(Event::SpaceStatus("自动空间分析已取消；目录关联仍保留".into(), request));
+                                        } else {
+                                            let _ = output.send(Event::SpaceStatus("正在自动分析新增目录…".into(), request));
+                                            let items = db.query(&Query::default())?;
+                                            let began = Instant::now();
+                                            let mut updated = Instant::now() - Duration::from_secs(1);
+                                            let tree = space::analyze(&[path], &items, &scan_cancel, |files| {
+                                                if updated.elapsed() >= Duration::from_millis(250) {
+                                                    let _ = output.send(Event::SpaceStatus(format!("空间分析：已读取 {files} 个文件，用时 {seconds} 秒", seconds = began.elapsed().as_secs()), request));
+                                                    updated = Instant::now();
+                                                }
+                                            })?;
+                                            let _ = output.send(Event::Analysis(tree, request));
+                                        }
+                                    }
                                     Ok(report.cancelled)
                                 })();
                                 if let Err(error) = result {
+                                    if let Some(request) = auto_request {
+                                        let _ = output.send(Event::SpaceStatus(format!("空间分析失败：{error:#}"), request));
+                                    }
                                     let _ =
                                         output.send(Event::Status(format!("扫描失败：{error:#}")));
                                 }
@@ -502,10 +707,19 @@ fn worker(
                         if scanning.load(Ordering::SeqCst) {
                             bail!("请先取消扫描再修改目录配置");
                         }
-                        if let Some(path) = rfd::FileDialog::new()
-                            .set_title("选择实际的 Minecraft 根目录 / 游戏目录")
-                            .pick_folder()
-                        {
+                        #[cfg(feature = "ui-smoke")]
+                        let preset = crate::ui_stage4_smoke::chosen_source();
+                        #[cfg(not(feature = "ui-smoke"))]
+                        let preset: Option<PathBuf> = None;
+                        let selected = preset.or_else(|| {
+                            rfd::FileDialog::new()
+                                .set_title(i18n::translate(
+                                    "选择实际的 Minecraft 根目录 / 游戏目录",
+                                    settings.english,
+                                ))
+                                .pick_folder()
+                        });
+                        if let Some(path) = selected {
                             let path = checked_path(&path)?;
                             if settings
                                 .sources
@@ -515,14 +729,18 @@ fn worker(
                                 bail!("该目录已添加");
                             }
                             settings.sources.push(Source {
-                                path,
+                                path: path.clone(),
                                 kind,
                                 associated_root,
                             });
                             index.save_settings(&settings)?;
                             let _ = events.send(Event::Settings(settings.clone()));
-                            let _ = events.send(Event::Status("目录已添加；正在刷新索引".into()));
-                            let _ = events.send(Event::SourcesChanged);
+                            let request = now_ms() as u64;
+                            cancel.store(false, Ordering::SeqCst);
+                            pending_added = Some((path.clone(), request));
+                            let _ = events
+                                .send(Event::Status("目录已添加；索引刷新后自动分析该目录".into()));
+                            let _ = events.send(Event::SourceAdded(path, request));
                         }
                     }
                     Command::RemoveSource(path) => {
@@ -577,7 +795,7 @@ fn worker(
                         index.save_settings(&settings)?;
                         let _ = events.send(Event::Settings(settings.clone()));
                     }
-                    Command::Map(subject_id, launcher_id, version_id, game_dir) => {
+                    Command::Map(subject_id, launcher_id, version_id, game_dir, script) => {
                         let subject = index.get(&subject_id)?.context("所选条目已失效")?;
                         let version = index.get(&version_id)?.context("目标版本已失效")?;
                         let installation = settings
@@ -585,8 +803,12 @@ fn worker(
                             .iter()
                             .find(|l| l.id == launcher_id)
                             .context("请选择启动器")?;
-                        let mapping =
+                        let mut mapping =
                             launcher::create_mapping(&subject, installation, &version, &game_dir)?;
+                        if let Some(script) = &script {
+                            launcher::validate_script(script)?;
+                        }
+                        mapping.script = script;
                         settings
                             .instance_defaults
                             .insert(subject.id.clone(), launcher_id.clone());
@@ -622,6 +844,33 @@ fn worker(
                         index.save_settings(&settings)?;
                         let _ = events.send(Event::Settings(settings.clone()));
                         let _ = events.send(Event::Status("已保存全局默认启动器".into()));
+                    }
+                    Command::LaunchScript(subject_id, launcher_id) => {
+                        let installation = settings
+                            .launchers
+                            .iter()
+                            .find(|l| l.id == launcher_id)
+                            .context("启动器未配置")?;
+                        let subject = index.get(&subject_id)?.context("所选条目已失效")?;
+                        let mapping = resolve_mapping(&settings, &subject, &launcher_id)
+                            .context("请先绑定该版本的启动脚本")?;
+                        let version = index
+                            .get(&format!("version:{}", path_key(&mapping.version_path)))?
+                            .context("目标版本已失效")?;
+                        let mut child = launcher::spawn_script(installation, mapping, &version)?;
+                        std::thread::sleep(Duration::from_millis(250));
+                        if let Some(exit) = child.try_wait()?
+                            && !exit.success()
+                        {
+                            bail!("启动脚本退出失败：{exit}");
+                        }
+                        children.push(child);
+                        index.record_opened(&subject_id)?;
+                        let _ = events.send(Event::Dirty);
+                        let _ = events.send(Event::Status(format!(
+                            "已运行关联脚本：{id}；请检查游戏窗口，未确认游戏进程",
+                            id = mapping.version_id
+                        )));
                     }
                     Command::Open(subject_id, launcher_id) => {
                         let installation = settings
@@ -672,6 +921,19 @@ fn worker(
                         let _ = events.send(Event::Dirty);
                         let _ = events.send(Event::Status("已向文件资源管理器发送定位请求".into()));
                     }
+                    Command::RevealPath(path) => {
+                        reveal(&path)?;
+                        let _ = events.send(Event::Status("已向文件资源管理器发送定位请求".into()));
+                    }
+                    Command::ExportLicenses => {
+                        let path = minecraft_explorer::licenses::export(
+                            db.parent().context("数据目录缺失")?,
+                        )?;
+                        reveal(&path)?;
+                        let _ = events.send(Event::Status(
+                            "已导出许可文件，请在资源管理器中双击查看".into(),
+                        ));
+                    }
                     Command::Copy(text) => {
                         arboard::Clipboard::new()?.set_text(text)?;
                         let _ = events.send(Event::Status("已复制到剪贴板".into()));
@@ -684,10 +946,256 @@ fn worker(
                             let _ = events.send(Event::Dirty);
                         }
                     }
+                    Command::PrepareOperation(
+                        ids,
+                        action,
+                        parent,
+                        name,
+                        conflict,
+                        scope,
+                        backup,
+                        signature,
+                    ) => {
+                        if scanning.swap(true, Ordering::SeqCst) {
+                            bail!("请等待或取消当前任务");
+                        }
+                        cancel.store(false, Ordering::SeqCst);
+                        let _ = events.send(Event::Scanning(true));
+                        let task = TaskState {
+                            running: scanning.clone(),
+                            events: events.clone(),
+                        };
+                        let selected = ids
+                            .iter()
+                            .map(|id| index.get(id)?.context("所选条目已失效，请刷新"))
+                            .collect::<Result<Vec<_>>>()?;
+                        let games = index.query(&Query {
+                            kind: Some(ItemKind::Instance),
+                            ..Default::default()
+                        })?;
+                        let policy =
+                            Policy::new(&settings, &games, db.parent().context("数据目录缺失")?)?;
+                        let flag = cancel.clone();
+                        let output = events.clone();
+                        std::thread::Builder::new()
+                            .name("operation-preview".into())
+                            .spawn(move || {
+                                let _task = task;
+                                let _ = output.send(Event::Status(
+                                    "正在检查真实路径、文件数和完整哈希…".into(),
+                                ));
+                                let result = if action == Action::Restore {
+                                    operations::prepare_restore(
+                                        &policy, &backup, &parent, conflict, &flag,
+                                    )
+                                } else {
+                                    operations::prepare(
+                                        &policy,
+                                        &selected,
+                                        action,
+                                        (!parent.as_os_str().is_empty())
+                                            .then_some(parent.as_path()),
+                                        &name,
+                                        conflict,
+                                        scope,
+                                        &flag,
+                                    )
+                                };
+                                match result {
+                                    Ok(plan) => {
+                                        let _ = output.send(Event::OperationPrepared(
+                                            Box::new(plan),
+                                            signature,
+                                        ));
+                                    }
+                                    Err(e) => {
+                                        let _ = output.send(Event::OperationError(format!(
+                                            "预览失败：{e:#}"
+                                        )));
+                                    }
+                                }
+                            })
+                            .context("无法创建操作预览线程")?;
+                    }
+                    Command::ExecuteOperation(plan) => {
+                        if scanning.swap(true, Ordering::SeqCst) {
+                            bail!("索引正在变化，请重新预览后再执行");
+                        }
+                        cancel.store(false, Ordering::SeqCst);
+                        let _ = events.send(Event::Scanning(true));
+                        let task = TaskState {
+                            running: scanning.clone(),
+                            events: events.clone(),
+                        };
+                        let games = index.query(&Query {
+                            kind: Some(ItemKind::Instance),
+                            ..Default::default()
+                        })?;
+                        let policy =
+                            Policy::new(&settings, &games, db.parent().context("数据目录缺失")?)?;
+                        let flag = cancel.clone();
+                        let output = events.clone();
+                        let completed = callback.clone();
+                        std::thread::Builder::new()
+                            .name("file-operation".into())
+                            .spawn(move || {
+                                let paths = plan
+                                    .units
+                                    .iter()
+                                    .flat_map(|u| {
+                                        std::iter::once(u.source.clone())
+                                            .chain(u.destination.clone())
+                                    })
+                                    .collect();
+                                let result = operations::execute(
+                                    &policy,
+                                    *plan,
+                                    &flag,
+                                    |done, total, message| {
+                                        let _ = output.send(Event::Progress(
+                                            done as f32 / total.max(1) as f32,
+                                            message,
+                                        ));
+                                    },
+                                );
+                                match result {
+                                    Ok(report) => {
+                                        let _ = completed.send(Command::OperationComplete(
+                                            Box::new(report),
+                                            task,
+                                        ));
+                                    }
+                                    Err(e) => {
+                                        let _ = completed.send(Command::OperationFailed(
+                                            paths,
+                                            format!(
+                                                "文件操作失败：{e:#}；请查看操作记录和真实路径"
+                                            ),
+                                            task,
+                                        ));
+                                    }
+                                }
+                            })
+                            .context("无法创建文件操作线程")?;
+                    }
+                    Command::OperationComplete(report, task) => {
+                        let _task = task;
+                        let mut paths = Vec::new();
+                        let mut messages = Vec::new();
+                        for outcome in &report.outcomes {
+                            paths.push(outcome.source.clone());
+                            if let Some(target) = &outcome.destination {
+                                paths.push(target.clone());
+                            }
+                            messages.push(format!(
+                                "{}：{}",
+                                display_path(&outcome.source),
+                                outcome.message
+                            ));
+                            if outcome.success
+                                && matches!(report.plan.action, Action::Rename | Action::Move)
+                                && let Some(target) = &outcome.destination
+                            {
+                                if let Err(e) = index.relocate_annotations(&outcome.source, target)
+                                {
+                                    messages.push(format!("文件已完成，但注释同步失败：{e:#}"));
+                                }
+                                if let Some(unit) = report
+                                    .plan
+                                    .units
+                                    .iter()
+                                    .find(|u| u.source == outcome.source)
+                                {
+                                    let new_id =
+                                        format!("{}:{}", unit.kind.as_str(), path_key(target));
+                                    if report.plan.action == Action::Rename {
+                                        for mapping in &mut settings.mappings {
+                                            if mapping.subject_id == unit.item_id {
+                                                mapping.subject_id = new_id.clone();
+                                            }
+                                        }
+                                        if let Some(default) =
+                                            settings.instance_defaults.remove(&unit.item_id)
+                                        {
+                                            settings.instance_defaults.insert(new_id, default);
+                                        }
+                                    } else {
+                                        settings.mappings.retain(|m| m.subject_id != unit.item_id);
+                                        settings.instance_defaults.remove(&unit.item_id);
+                                    }
+                                }
+                            }
+                        }
+                        index.save_settings(&settings)?;
+                        pending_paths.extend(paths);
+                        let policy = Policy::new(
+                            &settings,
+                            &index.query(&Query {
+                                kind: Some(ItemKind::Instance),
+                                ..Default::default()
+                            })?,
+                            db.parent().context("数据目录缺失")?,
+                        )?;
+                        let _ = events.send(Event::OperationHistory(operations::history(&policy)?));
+                        let _ = events.send(Event::Settings(settings.clone()));
+                        if report.finished {
+                            let _ = events.send(Event::OperationFinished);
+                        } else {
+                            let _ = events.send(Event::OperationError(messages.join("\n\n")));
+                        }
+                        let success = report.outcomes.iter().filter(|o| o.success).count();
+                        let _ = events.send(Event::Status(format!(
+                            "{}：{} / {} 项完成；{}",
+                            report.plan.action.label(),
+                            success,
+                            report.plan.units.len(),
+                            messages.join("；")
+                        )));
+                        for message in messages {
+                            let _ = events.send(Event::Warning(message));
+                        }
+                    }
+                    Command::OperationFailed(paths, message, task) => {
+                        let _task = task;
+                        pending_paths.extend(paths);
+                        let _ = events.send(Event::OperationError(message));
+                    }
+                    Command::History | Command::RevealHistory => {
+                        let policy = Policy::new(
+                            &settings,
+                            &index.query(&Query {
+                                kind: Some(ItemKind::Instance),
+                                ..Default::default()
+                            })?,
+                            db.parent().context("数据目录缺失")?,
+                        )?;
+                        if matches!(command, Command::RevealHistory) {
+                            std::fs::create_dir_all(&policy.records)?;
+                            reveal(&policy.records)?;
+                        }
+                        let _ = events.send(Event::OperationHistory(operations::history(&policy)?));
+                    }
+                    Command::BrowseOperation(field) => {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .set_title(i18n::translate(
+                                if field == 1 {
+                                    "选择本程序的目录备份"
+                                } else {
+                                    "选择目标父目录"
+                                },
+                                settings.english,
+                            ))
+                            .pick_folder()
+                        {
+                            let _ = events.send(Event::OperationBrowse(field, path));
+                        }
+                    }
                     Command::Browse(field) => {
                         let dialog = rfd::FileDialog::new();
-                        let path = if field == 1 {
+                        let path = if field == 1 || field == 4 {
                             dialog.pick_folder()
+                        } else if field == 3 {
+                            dialog.add_filter("BAT / CMD", &["bat", "cmd"]).pick_file()
                         } else {
                             dialog.pick_file()
                         };
@@ -699,10 +1207,20 @@ fn worker(
                 Ok(())
             })();
             if let Err(error) = result {
+                if let Some(request) = analysis_request {
+                    let _ = events.send(Event::SpaceStatus(
+                        format!("空间分析失败：{error:#}"),
+                        request,
+                    ));
+                }
                 let _ = events.send(Event::Status(format!("操作失败：{error:#}")));
+                if file_request {
+                    let _ = events.send(Event::OperationError(format!("操作失败：{error:#}")));
+                }
             }
         }
         cancel.store(true, Ordering::SeqCst);
+        let _ = events.send(Event::Scanning(false));
         Ok(())
     })();
     if let Err(error) = result {
@@ -732,25 +1250,32 @@ fn time_label(time: Option<i64>) -> String {
 
 fn detail(ui: &AppWindow, state: &UiState, item: &Item) {
     ui.set_detail_title(item.name.clone().into());
-    let size = bytes_label(item.size, item.size_complete);
-    ui.set_detail_text(format!("{}\n\n真实路径\n{}\n\n实际游戏目录\n{}\n\n归属\n{}\n\n版本定义 ID\n{}\n\n世界声明的历史版本\n{}\n\n逻辑大小\n{}\n\n最后游玩\n{}\n修改时间\n{}\n\n信息来源 / 状态\n{}{}", item.kind.label(), display_path(&item.path),
-        item.game_dir.as_ref().map(|p| display_path(p)).unwrap_or_else(|| "未确认；请手动关联".into()), item.ownership,
-        item.version_id.as_deref().unwrap_or("未知 / 共享"), item.game_version.as_deref().unwrap_or("未知"), size,
-        time_label(item.last_played_ms), time_label(item.modified_ms), item.metadata_status,
-        if item.available { "" } else { "\n来源离线：当前显示缓存" }).into());
+    let size = i18n::translate(
+        &bytes_label(item.size, item.size_complete),
+        ui.get_english(),
+    );
+    ui.set_detail_text(format!("{}\n\n真实路径\n{}\n\n实际游戏目录\n{}\n\n归属\n{}\n\n版本定义 ID\n{}\n\n世界声明的历史版本\n{}\n\n逻辑大小\n{}\n\n最后游玩\n{}\n修改时间\n{}\n\n信息来源 / 状态\n{}{}", i18n::translate(item.kind.label(),ui.get_english()), display_path(&item.path),
+        item.game_dir.as_ref().map(|p| display_path(p)).unwrap_or_else(|| i18n::translate("未确认；请手动关联",ui.get_english())), i18n::translate(&item.ownership,ui.get_english()),
+        item.version_id.clone().unwrap_or_else(|| i18n::translate("未知 / 共享",ui.get_english())), item.game_version.clone().unwrap_or_else(|| i18n::translate("未知",ui.get_english())), size,
+        i18n::translate(&time_label(item.last_played_ms),ui.get_english()), i18n::translate(&time_label(item.modified_ms),ui.get_english()), i18n::translate(&item.metadata_status,ui.get_english()),
+        i18n::translate(if item.available { "" } else { "\n来源离线：当前显示缓存" },ui.get_english())).into());
     if let Some(meta) = &item.content {
-        let extra = format!(
-            "\n\n内容声明信息\nID：{}\n版本：{}\n描述：{}\n作者：{}\nLoader：{}\n兼容性：{}",
-            meta.declared_id.as_deref().unwrap_or("未知"),
-            meta.declared_version.as_deref().unwrap_or("未知"),
-            meta.description.as_deref().unwrap_or("未提供"),
-            meta.authors.join("、"),
-            meta.loaders.join("、"),
-            meta.compatibility.join("、")
+        let extra = i18n::translate(
+            &format!(
+                "\n\n内容声明信息\nID：{}\n版本：{}\n描述：{}\n作者：{}\nLoader：{}\n兼容性：{}",
+                meta.declared_id.as_deref().unwrap_or("未知"),
+                meta.declared_version.as_deref().unwrap_or("未知"),
+                meta.description.as_deref().unwrap_or("未提供"),
+                meta.authors.join("、"),
+                meta.loaders.join("、"),
+                meta.compatibility.join("、")
+            ),
+            ui.get_english(),
         );
         ui.set_detail_text(format!("{}{extra}", ui.get_detail_text()).into());
     }
     launch_info(ui, state);
+    ui.set_detail_text(i18n::translate(&ui.get_detail_text(), ui.get_english()).into());
 }
 
 fn selected_launcher<'a>(ui: &AppWindow, state: &'a UiState) -> Option<&'a LauncherInstallation> {
@@ -761,12 +1286,19 @@ fn selected_launcher<'a>(ui: &AppWindow, state: &'a UiState) -> Option<&'a Launc
 }
 
 fn launch_info(ui: &AppWindow, state: &UiState) {
+    ui.set_can_launch_script(false);
     let Some(item) = &state.selected else {
         return;
     };
     let Some(installation) = selected_launcher(ui, state) else {
         ui.set_launch_status("LauncherNotConfigured".into());
-        ui.set_launch_hint("在设置中添加 PCL2 / PCL CE / HMCL 安装文件".into());
+        ui.set_launch_hint(
+            i18n::translate(
+                "在设置中添加 PCL2 / PCL CE / HMCL 安装文件",
+                ui.get_english(),
+            )
+            .into(),
+        );
         ui.set_can_open(false);
         ui.set_target_name("".into());
         return;
@@ -789,6 +1321,9 @@ fn launch_info(ui: &AppWindow, state: &UiState) {
             })
     });
     ui.set_can_open(same_root && valid_mapping && item.available);
+    ui.set_can_launch_script(
+        same_root && valid_mapping && item.available && mapping.is_some_and(|m| m.script.is_some()),
+    );
     ui.set_launch_status(
         if !same_root || !valid_mapping {
             "Unmapped"
@@ -802,11 +1337,13 @@ fn launch_info(ui: &AppWindow, state: &UiState) {
             "所选启动器属于另一个根目录，请切换或重新关联".to_string()
         } else if !valid_mapping {
             "映射目标已经失效，请刷新并重新设置关联".to_string()
+        } else if let Some(script) = mapping.and_then(|m| m.script.as_ref()) {
+            format!("已绑定启动脚本：{path}\n目标版本：{id}\n工作目录：{directory}", path = display_path(&script.path), id = target, directory = display_path(&script.working_dir))
         } else if target.is_empty() {
-            "无法确定目标版本；共享目录需手动关联。当前只能打开启动器。".to_string()
+            "共享目录需手动关联目标版本；在设置关联中可绑定该版本的启动脚本。".to_string()
         } else {
             format!(
-                "只能打开 {}。请在启动器内手动选择：{}\n根目录：{}",
+                "打开 {} 后手动选择：{}\n根目录：{}\n如需直接启动，请在设置关联中绑定该版本的启动脚本。",
                 installation.kind.label(),
                 target,
                 display_path(&installation.root)
@@ -814,14 +1351,32 @@ fn launch_info(ui: &AppWindow, state: &UiState) {
         }
         .into(),
     );
+    ui.set_launch_hint(i18n::translate(&ui.get_launch_hint(), ui.get_english()).into());
 }
 
 fn apply_settings(ui: &AppWindow, state: &mut UiState, settings: Settings) {
     let previous = selected_launcher(ui, state).map(|l| l.id.clone());
     state.settings = settings;
+    ui.set_english(state.settings.english);
+    ui.set_light_theme(state.settings.light_theme);
+    ui.set_filters(strings(
+        std::iter::once(i18n::translate("全部游戏目录", ui.get_english()))
+            .chain(
+                state
+                    .games
+                    .iter()
+                    .map(|g| format!("{} · {}", g.name, display_path(&g.path))),
+            )
+            .collect(),
+    ));
+    ui.set_status(i18n::translate(&state.raw_status, ui.get_english()).into());
+    ui.set_operation_history(i18n::translate(&state.raw_history, ui.get_english()).into());
+    if let Some(plan) = &state.operation_plan {
+        ui.set_operation_preview(plan.preview_localized(ui.get_english()).into());
+    }
     ui.set_watch_enabled(state.settings.watch_enabled);
     ui.set_source_labels(strings(
-        std::iter::once("全部来源 / 根目录".into())
+        std::iter::once(i18n::translate("全部来源 / 根目录", ui.get_english()))
             .chain(state.settings.sources.iter().map(|s| display_path(&s.path)))
             .collect(),
     ));
@@ -833,11 +1388,14 @@ fn apply_settings(ui: &AppWindow, state: &mut UiState, settings: Settings) {
                 .iter()
                 .map(|s| SourceRow {
                     path: display_path(&s.path).into(),
-                    label: if s.kind == SourceKind::Root {
-                        "Minecraft 根目录"
-                    } else {
-                        "自定义游戏目录"
-                    }
+                    label: i18n::translate(
+                        if s.kind == SourceKind::Root {
+                            "Minecraft 根目录"
+                        } else {
+                            "自定义游戏目录"
+                        },
+                        ui.get_english(),
+                    )
                     .into(),
                 })
                 .collect::<Vec<_>>(),
@@ -852,14 +1410,21 @@ fn apply_settings(ui: &AppWindow, state: &mut UiState, settings: Settings) {
                 .iter()
                 .map(|l| LauncherRow {
                     id: l.id.clone().into(),
-                    label: format!(
-                        "{}{} · OpenOnly",
-                        l.kind.label(),
-                        if state.settings.default_launcher.as_ref() == Some(&l.id) {
-                            "（默认）"
-                        } else {
-                            ""
-                        }
+                    label: i18n::translate(
+                        &format!(
+                            "{}{} · OpenOnly",
+                            l.kind.label(),
+                            if state.settings.default_launcher.as_ref() == Some(&l.id) {
+                                if ui.get_english() {
+                                    " (default)"
+                                } else {
+                                    "（默认）"
+                                }
+                            } else {
+                                ""
+                            }
+                        ),
+                        ui.get_english(),
                     )
                     .into(),
                     path: display_path(&l.executable).into(),
@@ -896,6 +1461,204 @@ fn apply_settings(ui: &AppWindow, state: &mut UiState, settings: Settings) {
         ui.set_launcher_index(position as i32);
     }
     launch_info(ui, state);
+    if let Some(item) = &state.selected {
+        detail(ui, state, item);
+    }
+    update_space_scopes(ui, state);
+    render_space(ui, state);
+}
+
+fn render_space(ui: &AppWindow, state: &UiState) {
+    let Some(analysis) = &state.analysis else {
+        return;
+    };
+    let english = ui.get_english();
+    let node = &analysis.nodes[state.space_node];
+    let colors = [
+        (49, 124, 86),
+        (55, 113, 166),
+        (142, 91, 173),
+        (182, 117, 52),
+        (48, 135, 139),
+        (93, 107, 125),
+    ];
+    let tint = |category: usize| {
+        let (r, g, b) = colors[category];
+        slint::Color::from_rgb_u8(r, g, b)
+    };
+    let tiles = analysis
+        .layout(state.space_node, 1.8)
+        .into_iter()
+        .map(|tile| {
+            let entry = tile.node.map(|i| &analysis.nodes[i]);
+            let size = bytes_label(Some(tile.bytes), node.complete);
+            let title = entry
+                .map(|n| n.name.clone())
+                .unwrap_or_else(|| i18n::translate("其他小项 / 汇总", english));
+            let info = entry
+                .map(|n| {
+                    format!(
+                        "{} · {}\n{}\n{}",
+                        n.name,
+                        size,
+                        n.path.as_ref().map(|p| display_path(p)).unwrap_or_default(),
+                        n.owner
+                    )
+                })
+                .unwrap_or_else(|| format!("{title} · {size}"));
+            SpaceTile {
+                node: tile.node.map_or(-1, |n| n as i32),
+                title: title.into(),
+                info: info.into(),
+                size: size.into(),
+                x: tile.x,
+                y: tile.y,
+                w: tile.width,
+                h: tile.height,
+                tint: tint(tile.category),
+                directory: entry.is_some_and(|n| n.directory && !n.children.is_empty()),
+                item_id: entry
+                    .and_then(|n| n.item_id.clone())
+                    .unwrap_or_default()
+                    .into(),
+            }
+        })
+        .collect::<Vec<_>>();
+    ui.set_space_tiles(Rc::new(VecModel::from(tiles)).into());
+    let names = ["存档", "资源包", "模组", "光影包", "数据包", "其他文件"];
+    let total = analysis.nodes[0].bytes;
+    ui.set_space_bytes(total.to_string().into());
+    ui.set_space_bars(
+        Rc::new(VecModel::from(
+            analysis
+                .categories
+                .iter()
+                .enumerate()
+                .map(|(i, bytes)| SpaceBar {
+                    title: i18n::translate(names[i], english).into(),
+                    size: bytes_label(Some(*bytes), analysis.nodes[0].complete).into(),
+                    ratio: if total == 0 {
+                        0.
+                    } else {
+                        (*bytes as f64 / total as f64) as f32
+                    },
+                    tint: tint(i),
+                })
+                .collect::<Vec<_>>(),
+        ))
+        .into(),
+    );
+    let summary = format!(
+        "逻辑占用 {} / {} 个文件 / {} 项未读取{}",
+        bytes_label(Some(total), analysis.nodes[0].complete),
+        analysis.files,
+        analysis.skipped,
+        if analysis.cancelled {
+            "；已取消，结果不完整"
+        } else {
+            ""
+        }
+    );
+    ui.set_space_summary(i18n::translate(&summary, english).into());
+    ui.set_space_path(
+        node.path
+            .as_ref()
+            .map(|p| display_path(p))
+            .unwrap_or_else(|| i18n::translate("全部来源", english))
+            .into(),
+    );
+    ui.set_space_can_up(!state.space_parents.is_empty());
+    let advice = format!(
+        "存档占用：{}。先备份，再检查不再使用的世界。\n模组、包与光影占用：{}。重复候选只说明检测时字节相同，请核对实例依赖。\n其他文件占用：{}。可双击逐层查看日志、截图和下载缓存；本程序不会自动判断可删除。\n分析是当前快照，文件变化后请重新分析。未读取项使大小显示为下限；合并矩形可通过上一级或目录钻取查看。",
+        bytes_label(Some(analysis.categories[0]), true),
+        bytes_label(
+            Some(
+                analysis.categories[1]
+                    + analysis.categories[2]
+                    + analysis.categories[3]
+                    + analysis.categories[4]
+            ),
+            true
+        ),
+        bytes_label(Some(analysis.categories[5]), true)
+    );
+    ui.set_space_advice(i18n::translate(&advice, english).into());
+}
+
+// 范围按真实路径集合比较；重复实例路径或显示文字变化不应清空已完成快照。
+fn scope_keys(paths: &[PathBuf]) -> Vec<String> {
+    let mut keys = paths.iter().map(|p| path_key(p)).collect::<Vec<_>>();
+    keys.sort_by_key(|key| (key.len(), key.clone()));
+    let mut roots = Vec::<String>::new();
+    for key in keys {
+        if !roots.iter().any(|root| {
+            key == *root
+                || key.starts_with(&format!(
+                    "{}{}",
+                    root.trim_end_matches(std::path::MAIN_SEPARATOR),
+                    std::path::MAIN_SEPARATOR
+                ))
+        }) {
+            roots.push(key);
+        }
+    }
+    roots
+}
+
+fn update_space_scopes(ui: &AppWindow, state: &mut UiState) {
+    let all = state
+        .settings
+        .sources
+        .iter()
+        .map(|s| s.path.clone())
+        .chain(state.games.iter().map(|g| g.path.clone()))
+        .collect::<Vec<_>>();
+    let mut scopes = vec![all];
+    let mut labels = vec![i18n::translate("全部来源", ui.get_english())];
+    for source in &state.settings.sources {
+        scopes.push(vec![source.path.clone()]);
+        labels.push(display_path(&source.path));
+    }
+    for game in &state.games {
+        if !scopes.iter().skip(1).any(|p| {
+            p.first()
+                .is_some_and(|p| path_key(p) == path_key(&game.path))
+        }) {
+            scopes.push(vec![game.path.clone()]);
+            labels.push(format!("{} · {}", game.name, display_path(&game.path)));
+        }
+    }
+    let current = ui.get_space_index().max(0) as usize;
+    let previous = state
+        .space_scopes
+        .get(current)
+        .map(|paths| scope_keys(paths));
+    let next = scopes.get(current).map(|paths| scope_keys(paths));
+    if previous != next {
+        state.analysis = None;
+        state.space_parents.clear();
+        ui.set_space_tiles(ModelRc::default());
+        ui.set_space_bars(ModelRc::default());
+        ui.set_space_can_up(false);
+        ui.set_space_can_view(false);
+        ui.set_space_can_reveal(false);
+        ui.set_space_summary(
+            i18n::translate(
+                if state.auto_analysis_request.is_some() {
+                    "索引刷新后自动分析新增目录…"
+                } else {
+                    "请开始分析，统计实际文件大小"
+                },
+                ui.get_english(),
+            )
+            .into(),
+        );
+    }
+    state.space_scopes = scopes;
+    ui.set_space_scopes(strings(labels));
+    if ui.get_space_index() as usize >= state.space_scopes.len() {
+        ui.set_space_index(0);
+    }
 }
 
 fn queue_query(ui: &AppWindow, state: &mut UiState, sender: &mpsc::Sender<Command>) {
@@ -950,10 +1713,25 @@ fn queue_query(ui: &AppWindow, state: &mut UiState, sender: &mpsc::Sender<Comman
     state.last_query = Some(Instant::now());
 }
 
+fn operation_signature(ui: &AppWindow, ids: &[String]) -> String {
+    serde_json::to_string(&(
+        ids,
+        ui.get_operation_action(),
+        ui.get_operation_name().to_string(),
+        ui.get_operation_parent().to_string(),
+        ui.get_operation_backup().to_string(),
+        ui.get_operation_conflict(),
+        ui.get_operation_version_scope(),
+    ))
+    .unwrap_or_default()
+}
+
 pub fn run() -> Result<()> {
     let db = storage_path()?;
     Index::open(&db)?;
     let ui = AppWindow::new()?;
+    ui.global::<I18n>()
+        .on_translate(|value| i18n::translate(&value, true).into());
     let (sender, commands) = mpsc::channel();
     let (events, receiver) = mpsc::channel();
     let (icon_sender, icon_requests) = mpsc::sync_channel(64);
@@ -997,10 +1775,251 @@ pub fn run() -> Result<()> {
     });
     let cancel = Arc::new(AtomicBool::new(false));
     let worker_cancel = cancel.clone();
-    std::thread::spawn(move || worker(db, commands, events, worker_cancel));
+    let callbacks = sender.clone();
+    let closing = Arc::new(AtomicBool::new(false));
+    let worker_closing = closing.clone();
+    std::thread::spawn(move || {
+        worker(
+            db,
+            commands,
+            events,
+            worker_cancel,
+            callbacks,
+            worker_closing,
+        )
+    });
     let state = Rc::new(RefCell::new(UiState::default()));
-    state.borrow_mut().diagnostics.push("阶段 2：只读内容索引。PCL2 / PCL CE / HMCL 当前仅具备 OpenLauncher；指定实例直接启动尚未验证。\n大小口径：逻辑字节；内容与世界、游戏目录大小不可叠加。\n监控变化会增量刷新叶条目，实例总大小需 F5 完整刷新；收藏与标签只写入本程序数据库。\n重复检测只列出完整哈希一致的候选，不提供删除。\n不跟随符号链接、junction 或重解析点。".into());
+    state.borrow_mut().diagnostics.push("阶段 3：安全文件管理。PCL2 / PCL CE / HMCL 当前仅具备 OpenLauncher；指定实例直接启动尚未验证。\n大小口径：逻辑字节；内容与世界、游戏目录大小不可叠加。\n文件操作先预览再确认，不覆盖；移动先复制校验，再将原件移入回收站。\n收藏与标签只写入本程序数据库；重命名和移动后同步注释。\n数据包必须包含根级 pack.mcmeta 和 data/；不跟随链接、junction 或重解析点。".into());
     let weak = ui.as_weak();
+    let appearance_sender = sender.clone();
+    let appearance_ui = weak.clone();
+    let appearance_state = state.clone();
+    ui.on_appearance_changed(move || {
+        if let Some(ui) = appearance_ui.upgrade() {
+            let mut state = appearance_state.borrow_mut();
+            state.appearance_request += 1;
+            state.appearance_pending = true;
+            let mut settings = state.settings.clone();
+            settings.english = ui.get_english();
+            settings.light_theme = ui.get_light_theme();
+            apply_settings(&ui, &mut state, settings);
+            state.query_due = Some(Instant::now());
+            let _ = appearance_sender.send(Command::Appearance(
+                ui.get_english(),
+                ui.get_light_theme(),
+                state.appearance_request,
+            ));
+        }
+    });
+    let analyze_state = state.clone();
+    let analyze_ui = weak.clone();
+    let analyze_sender = sender.clone();
+    ui.on_analyze_space(move || {
+        if let Some(ui) = analyze_ui.upgrade() {
+            let mut state = analyze_state.borrow_mut();
+            if ui.get_scanning() {
+                return;
+            }
+            let paths = state
+                .space_scopes
+                .get(ui.get_space_index().max(0) as usize)
+                .cloned()
+                .unwrap_or_default();
+            if paths.is_empty() {
+                return;
+            }
+            state.analysis_request += 1;
+            state.space_node = 0;
+            state.space_parents.clear();
+            ui.set_scanning(true);
+            let _ = analyze_sender.send(Command::Analyze(paths, state.analysis_request));
+            ui.set_space_summary(i18n::translate("正在分析实际目录…", ui.get_english()).into());
+        }
+    });
+    let scope_state = state.clone();
+    let scope_ui = weak.clone();
+    ui.on_space_scope_changed(move || {
+        if let Some(ui) = scope_ui.upgrade()
+            && let Ok(mut state) = scope_state.try_borrow_mut()
+        {
+            if state.assigned_space_index.take() == Some(ui.get_space_index()) {
+                return;
+            }
+            // 设置自动分析范围也会触发延迟的 changed 回调，不能把自己的请求作废。
+            if state.auto_analysis_request == Some(state.analysis_request)
+                && state.auto_analysis_path.as_ref().is_some_and(|path| {
+                    state
+                        .space_scopes
+                        .get(ui.get_space_index().max(0) as usize)
+                        .is_some_and(|scope| {
+                            scope.len() == 1 && path_key(&scope[0]) == path_key(path)
+                        })
+                })
+            {
+                return;
+            }
+            state.auto_analysis_request = None;
+            state.auto_analysis_path = None;
+            state.analysis_request += 1;
+            state.analysis = None;
+            state.space_parents.clear();
+            state.space_node = 0;
+            ui.set_space_tiles(ModelRc::default());
+            ui.set_space_bars(ModelRc::default());
+            ui.set_space_selected(-1);
+            ui.set_space_can_up(false);
+            ui.set_space_can_reveal(false);
+            ui.set_space_can_view(false);
+            ui.set_space_info("".into());
+            ui.set_space_summary(
+                i18n::translate("请开始分析，统计实际文件大小", ui.get_english()).into(),
+            );
+        }
+    });
+    let space_state = state.clone();
+    let space_ui = weak.clone();
+    let space_sender = sender.clone();
+    ui.on_space_action(move |node, action| {
+        let Some(ui) = space_ui.upgrade() else {
+            return;
+        };
+        let mut state = space_state.borrow_mut();
+        if action == 2 {
+            if let Some(parent) = state.space_parents.pop() {
+                state.space_node = parent;
+                ui.set_space_selected(-1);
+                ui.set_space_can_reveal(false);
+                ui.set_space_can_view(false);
+                render_space(&ui, &state);
+            }
+            return;
+        }
+        let Some(entry) = state
+            .analysis
+            .as_ref()
+            .and_then(|a| a.nodes.get(node as usize))
+            .cloned()
+        else {
+            ui.set_space_selected(-1);
+            ui.set_space_can_reveal(false);
+            ui.set_space_can_view(false);
+            return;
+        };
+        if action == 1 && entry.directory && !entry.children.is_empty() {
+            let parent = state.space_node;
+            state.space_parents.push(parent);
+            state.space_node = node as usize;
+            ui.set_space_selected(-1);
+            ui.set_space_can_reveal(false);
+            ui.set_space_can_view(false);
+            render_space(&ui, &state);
+        } else if action == 3 {
+            if let Some(path) = entry.path {
+                let _ = space_sender.send(Command::RevealPath(path));
+            }
+        } else if action == 4 {
+            if let Some(id) = entry.item_id {
+                drop(state);
+                ui.set_filter_index(0);
+                ui.set_source_index(0);
+                ui.set_favorite_only(false);
+                ui.set_tag_filter("".into());
+                ui.set_search(
+                    entry
+                        .path
+                        .map(|p| display_path(&p))
+                        .unwrap_or_default()
+                        .into(),
+                );
+                ui.set_page(0);
+                ui.invoke_navigate(0);
+                ui.set_selected_id(id.clone().into());
+                let _ = space_sender.send(Command::Detail(id));
+            }
+        } else {
+            ui.set_space_selected(node);
+            ui.set_space_can_reveal(entry.path.is_some());
+            ui.set_space_can_view(entry.item_id.is_some());
+            ui.set_space_info(
+                format!(
+                    "{} · {}\n{}\n{}",
+                    entry.name,
+                    bytes_label(Some(entry.bytes), entry.complete),
+                    entry.path.map(|p| display_path(&p)).unwrap_or_default(),
+                    entry.owner
+                )
+                .into(),
+            );
+        }
+    });
+    let action_ui = weak.clone();
+    ui.on_entry_action(move |id, action| {
+        let Some(ui) = action_ui.upgrade() else {
+            return;
+        };
+        ui.set_selected_id(id.clone());
+        ui.invoke_selected(id);
+        match action {
+            0 => ui.invoke_reveal_selected(),
+            1 => ui.invoke_copy_selected(),
+            2..=6 => ui.invoke_begin_operation(action - 2, true),
+            7 => {
+                ui.set_detail_favorite(!ui.get_detail_favorite());
+                ui.invoke_annotate_selected();
+            }
+            8 if ui.get_can_open() => ui.invoke_open_launcher(),
+            _ => (),
+        }
+    });
+    let key_ui = weak.clone();
+    ui.on_keyboard_action(move |action| {
+        if let Some(ui) = key_ui.upgrade() {
+            match action {
+                10 => ui.invoke_select_all(),
+                11 => ui.invoke_clear_selection(),
+                12 | 13 => {
+                    let entries = ui.get_entries();
+                    let current = entries
+                        .iter()
+                        .position(|row| row.id == ui.get_selected_id());
+                    let next = if action == 12 {
+                        current.unwrap_or(0).saturating_sub(1)
+                    } else {
+                        current
+                            .map_or(0, |i| i + 1)
+                            .min(entries.row_count().saturating_sub(1))
+                    };
+                    if let Some(row) = entries.row_data(next) {
+                        ui.set_selected_id(row.id.clone());
+                        ui.invoke_selected(row.id);
+                    }
+                }
+                _ => {
+                    if !ui.get_selected_id().is_empty() {
+                        ui.invoke_entry_action(ui.get_selected_id(), action);
+                    }
+                }
+            }
+        }
+    });
+    let close_ui = weak.clone();
+    let close_state = state.clone();
+    let close_cancel = cancel.clone();
+    ui.window().on_close_requested(move || {
+        closing.store(true, Ordering::SeqCst);
+        close_cancel.store(true, Ordering::SeqCst);
+        if let Some(ui) = close_ui.upgrade()
+            && ui.get_scanning()
+        {
+            close_state.borrow_mut().close_requested = true;
+            ui.set_status(
+                i18n::translate("正在取消任务，完成收尾后关闭…", ui.get_english()).into(),
+            );
+            slint::CloseRequestResponse::KeepWindowShown
+        } else {
+            slint::CloseRequestResponse::HideWindow
+        }
+    });
     let query_state = state.clone();
     ui.on_query_changed(move || {
         if let Ok(mut state) = query_state.try_borrow_mut() {
@@ -1013,7 +2032,13 @@ pub fn run() -> Result<()> {
     ui.on_navigate(move |_| {
         if let Some(ui) = nav_ui.upgrade() {
             ui.set_selected_id("".into());
+            ui.set_current_row_index(-1);
             nav_state.borrow_mut().selected = None;
+            nav_state.borrow_mut().checked.clear();
+            ui.set_checked_count(0);
+            if ui.get_page() == 7 {
+                let _ = nav_sender.send(Command::History);
+            }
             queue_query(&ui, &mut nav_state.borrow_mut(), &nav_sender);
         }
     });
@@ -1026,7 +2051,13 @@ pub fn run() -> Result<()> {
     ui.on_cancel_scan(move || {
         cancel_flag.store(true, Ordering::SeqCst);
         if let Some(ui) = cancel_ui.upgrade() {
-            ui.set_status("正在取消扫描…".into());
+            ui.set_status(
+                i18n::translate(
+                    "正在取消未完成部分；已提交的文件操作保留…",
+                    ui.get_english(),
+                )
+                .into(),
+            );
         }
     });
     let add_sender = sender.clone();
@@ -1064,6 +2095,12 @@ pub fn run() -> Result<()> {
         if let Some(ui) = select_ui.upgrade() {
             let mut state = select_state.borrow_mut();
             state.selected = state.items.iter().find(|i| i.id == id.as_str()).cloned();
+            ui.set_current_row_index(
+                state
+                    .row_positions
+                    .get(id.as_str())
+                    .map_or(-1, |i| *i as i32),
+            );
             ui.set_has_icon(false);
             if let Some(item) = &state.selected {
                 let preferred = state
@@ -1150,9 +2187,35 @@ pub fn run() -> Result<()> {
     });
     let map_ui = weak.clone();
     let begin_map_state = state.clone();
+    let script_ui = weak.clone();
+    let script_state = state.clone();
+    let script_sender = sender.clone();
+    ui.on_launch_script(move || {
+        if let Some(ui) = script_ui.upgrade() {
+            let state = script_state.borrow();
+            if ui.get_can_launch_script()
+                && !ui.get_scanning()
+                && let Some(l) = selected_launcher(&ui, &state)
+            {
+                let _ = script_sender.send(Command::LaunchScript(
+                    ui.get_selected_id().to_string(),
+                    l.id.clone(),
+                ));
+            }
+        }
+    });
+    let target_ui = weak.clone();
+    ui.on_mapping_target_changed(move || {
+        if let Some(ui) = target_ui.upgrade() {
+            ui.set_mapping_script("".into());
+            ui.set_mapping_script_workdir("".into());
+        }
+    });
     ui.on_begin_mapping(move || {
         if let Some(ui) = map_ui.upgrade() {
             let state = begin_map_state.borrow();
+            ui.set_mapping_script("".into());
+            ui.set_mapping_script_workdir("".into());
             if let Some(item) = &state.selected {
                 if let Some(position) = state.games.iter().position(|g| g.game_dir == item.game_dir)
                 {
@@ -1165,6 +2228,21 @@ pub fn run() -> Result<()> {
                             && v.root == item.root)
                 }) {
                     ui.set_version_index(position as i32);
+                }
+                if let Some(installation) = selected_launcher(&ui, &state)
+                    && let Some(mapping) = resolve_mapping(&state.settings, item, &installation.id)
+                {
+                    if let Some(position) = state
+                        .versions
+                        .iter()
+                        .position(|v| v.path == mapping.version_path)
+                    {
+                        ui.set_version_index(position as i32);
+                    }
+                    if let Some(script) = &mapping.script {
+                        ui.set_mapping_script(display_path(&script.path).into());
+                        ui.set_mapping_script_workdir(display_path(&script.working_dir).into());
+                    }
                 }
             }
             ui.set_mapping_visible(true);
@@ -1186,9 +2264,22 @@ pub fn run() -> Result<()> {
                     l.id.clone(),
                     v.id.clone(),
                     g.path.clone(),
+                    if ui.get_mapping_script().trim().is_empty() {
+                        None
+                    } else {
+                        let path = PathBuf::from(ui.get_mapping_script().trim());
+                        let working_dir = if ui.get_mapping_script_workdir().trim().is_empty() {
+                            path.parent().unwrap_or(&path).to_path_buf()
+                        } else {
+                            PathBuf::from(ui.get_mapping_script_workdir().trim())
+                        };
+                        Some(LaunchScript { path, working_dir })
+                    },
                 ));
             } else {
-                ui.set_status("请先添加启动器并扫描可用版本定义".into());
+                ui.set_status(
+                    i18n::translate("请先添加启动器并扫描可用版本定义", ui.get_english()).into(),
+                );
             }
         }
     });
@@ -1256,7 +2347,9 @@ pub fn run() -> Result<()> {
                 .root_paths
                 .get(ui.get_edit_root_index().max(0) as usize)
             else {
-                ui.set_status("请先添加 Minecraft 根目录".into());
+                ui.set_status(
+                    i18n::translate("请先添加 Minecraft 根目录", ui.get_english()).into(),
+                );
                 return;
             };
             let java = ui.get_edit_java().to_string();
@@ -1324,6 +2417,240 @@ pub fn run() -> Result<()> {
         let _ = duplicate_sender.send(Command::Duplicates);
     });
 
+    let toggle_ui = weak.clone();
+    let toggle_state = state.clone();
+    ui.on_toggle_entry(move |id| {
+        if let Some(ui) = toggle_ui.upgrade() {
+            let mut state = toggle_state.borrow_mut();
+            if !state.checked.remove(id.as_str()) {
+                state.checked.insert(id.to_string());
+            }
+            if let Some(&row) = state.row_positions.get(id.as_str())
+                && let Some(mut data) = state.row_model.row_data(row)
+            {
+                data.checked = state.checked.contains(id.as_str());
+                state.row_model.set_row_data(row, data);
+            }
+            ui.set_checked_count(state.checked.len() as i32);
+        }
+    });
+    let all_ui = weak.clone();
+    let all_state = state.clone();
+    ui.on_select_all(move || {
+        if let Some(ui) = all_ui.upgrade() {
+            let mut state = all_state.borrow_mut();
+            state.checked = state
+                .items
+                .iter()
+                .filter(|i| i.kind != ItemKind::Instance && i.available)
+                .take(256)
+                .map(|i| i.id.clone())
+                .collect();
+            for n in 0..state.row_model.row_count() {
+                if let Some(mut row) = state.row_model.row_data(n) {
+                    row.checked = state.checked.contains(row.id.as_str());
+                    state.row_model.set_row_data(n, row);
+                }
+            }
+            ui.set_checked_count(state.checked.len() as i32);
+        }
+    });
+    let clear_ui = weak.clone();
+    let clear_state = state.clone();
+    ui.on_clear_selection(move || {
+        if let Some(ui) = clear_ui.upgrade() {
+            let mut state = clear_state.borrow_mut();
+            state.checked.clear();
+            for n in 0..state.row_model.row_count() {
+                if let Some(mut row) = state.row_model.row_data(n) {
+                    row.checked = false;
+                    state.row_model.set_row_data(n, row);
+                }
+            }
+            ui.set_checked_count(0);
+        }
+    });
+    let begin_ui = weak.clone();
+    let begin_state = state.clone();
+    ui.on_begin_operation(move |action, only_selected| {
+        if let Some(ui) = begin_ui.upgrade() {
+            if ui.get_scanning() {
+                return;
+            }
+            let ids = {
+                let state = begin_state.borrow();
+                if action == 5 {
+                    Vec::new()
+                } else if only_selected || state.checked.is_empty() {
+                    vec![ui.get_selected_id().to_string()]
+                } else {
+                    state
+                        .items
+                        .iter()
+                        .filter(|i| state.checked.contains(&i.id))
+                        .map(|i| i.id.clone())
+                        .collect()
+                }
+            };
+            if action != 5 && (ids.is_empty() || ids.iter().any(String::is_empty)) {
+                ui.set_status(i18n::translate("请先选中或勾选条目", ui.get_english()).into());
+                return;
+            }
+            ui.set_operation_visible(false);
+            ui.set_operation_action(action);
+            ui.set_operation_ready(false);
+            ui.set_operation_confirmed(false);
+            ui.set_operation_parent("".into());
+            ui.set_operation_backup("".into());
+            ui.set_operation_conflict(0);
+            ui.set_operation_version_scope(0);
+            let name = {
+                let state = begin_state.borrow();
+                ids.first()
+                    .and_then(|id| state.items.iter().find(|i| &i.id == id))
+                    .map(|i| i.folder.clone())
+                    .unwrap_or_default()
+            };
+            ui.set_operation_name(name.into());
+            ui.set_operation_preview(
+                i18n::translate(
+                    "填写操作参数后生成预览；此步骤只读取源文件。",
+                    ui.get_english(),
+                )
+                .into(),
+            );
+            let mut state = begin_state.borrow_mut();
+            state.operation_ids = ids;
+            state.operation_plan = None;
+            ui.set_operation_visible(true);
+        }
+    });
+    let edited_ui = weak.clone();
+    let edited_state = state.clone();
+    ui.on_operation_edited(move || {
+        if let Some(ui) = edited_ui.upgrade() {
+            ui.set_operation_ready(false);
+            ui.set_operation_confirmed(false);
+            if let Ok(mut state) = edited_state.try_borrow_mut() {
+                state.operation_plan = None;
+            }
+            if ui.get_operation_visible() {
+                ui.set_operation_preview(
+                    i18n::translate("参数已变化，请重新生成预览。", ui.get_english()).into(),
+                );
+            }
+        }
+    });
+    let prepare_ui = weak.clone();
+    let prepare_state = state.clone();
+    let prepare_sender = sender.clone();
+    ui.on_prepare_operation(move || {
+        if let Some(ui) = prepare_ui.upgrade() {
+            if ui.get_scanning() {
+                return;
+            }
+            let action = match ui.get_operation_action() {
+                0 => Action::Rename,
+                1 => Action::Copy,
+                2 => Action::Move,
+                3 => Action::Backup,
+                4 => Action::Recycle,
+                _ => Action::Restore,
+            };
+            ui.set_operation_ready(false);
+            ui.set_operation_confirmed(false);
+            ui.set_operation_preview(
+                i18n::translate("正在后台核对路径和文件哈希…", ui.get_english()).into(),
+            );
+            ui.set_scanning(true);
+            let signature = {
+                let mut state = prepare_state.borrow_mut();
+                let signature = operation_signature(&ui, &state.operation_ids);
+                state.operation_signature = signature.clone();
+                signature
+            };
+            let _ = prepare_sender.send(Command::PrepareOperation(
+                prepare_state.borrow().operation_ids.clone(),
+                action,
+                PathBuf::from(ui.get_operation_parent().as_str()),
+                ui.get_operation_name().to_string(),
+                if ui.get_operation_conflict() == 0 {
+                    Conflict::Abort
+                } else {
+                    Conflict::KeepBoth
+                },
+                if ui.get_operation_version_scope() == 0 {
+                    VersionScope::CoreOnly
+                } else {
+                    VersionScope::IndependentDirectory
+                },
+                PathBuf::from(ui.get_operation_backup().as_str()),
+                signature,
+            ));
+        }
+    });
+    let confirm_ui = weak.clone();
+    let confirm_state = state.clone();
+    let confirm_sender = sender.clone();
+    ui.on_confirm_operation(move || {
+        if let Some(ui) = confirm_ui.upgrade()
+            && ui.get_operation_ready()
+            && ui.get_operation_confirmed()
+            && !ui.get_scanning()
+        {
+            let mut state = confirm_state.borrow_mut();
+            if operation_signature(&ui, &state.operation_ids) != state.operation_signature {
+                state.operation_plan = None;
+                ui.set_operation_ready(false);
+                ui.set_operation_confirmed(false);
+                ui.set_operation_preview(
+                    i18n::translate("参数已改变，请重新生成预览。", ui.get_english()).into(),
+                );
+                return;
+            }
+            let Some(plan) = state.operation_plan.take() else {
+                return;
+            };
+            ui.set_operation_ready(false);
+            ui.set_operation_confirmed(false);
+            ui.set_operation_preview(
+                i18n::translate("正在执行；可取消尚未提交的部分。", ui.get_english()).into(),
+            );
+            ui.set_scanning(true);
+            let _ = confirm_sender.send(Command::ExecuteOperation(Box::new(plan)));
+        }
+    });
+    let dismiss_ui = weak.clone();
+    let dismiss_state = state.clone();
+    let dismiss_cancel = cancel.clone();
+    ui.on_dismiss_operation(move || {
+        if let Some(ui) = dismiss_ui.upgrade() {
+            if ui.get_scanning() {
+                dismiss_cancel.store(true, Ordering::SeqCst);
+            }
+            ui.set_operation_visible(false);
+            ui.set_operation_ready(false);
+            ui.set_operation_confirmed(false);
+            dismiss_state.borrow_mut().operation_plan = None;
+        }
+    });
+    let browse_operation_sender = sender.clone();
+    ui.on_browse_operation(move |field| {
+        let _ = browse_operation_sender.send(Command::BrowseOperation(field));
+    });
+    let history_sender = sender.clone();
+    ui.on_show_history(move || {
+        let _ = history_sender.send(Command::History);
+    });
+    let reveal_history_sender = sender.clone();
+    ui.on_reveal_history(move || {
+        let _ = reveal_history_sender.send(Command::RevealHistory);
+    });
+    let license_sender = sender.clone();
+    ui.on_export_licenses(move || {
+        let _ = license_sender.send(Command::ExportLicenses);
+    });
+
     let poll_state = state.clone();
     let poll_ui = weak.clone();
     let poll_sender = sender.clone();
@@ -1333,13 +2660,58 @@ pub fn run() -> Result<()> {
         let Some(ui) = poll_ui.upgrade() else { return; }; let mut state = poll_state.borrow_mut();
         for event in receiver.try_iter().take(100) {
             match event {
-                Event::Settings(settings) => {
+                Event::Settings(mut settings) => {
+                    if state.appearance_pending {
+                        settings.english = state.settings.english;
+                        settings.light_theme = state.settings.light_theme;
+                    }
                     let first = state.last_query.is_none();
                     let previous_source=ui.get_source_index().checked_sub(1).and_then(|i|state.settings.sources.get(i as usize)).map(|s|path_key(&s.path));
                     apply_settings(&ui,&mut state,settings);
                     ui.set_source_index(previous_source.and_then(|key|state.settings.sources.iter().position(|s|path_key(&s.path)==key)).map(|i|i as i32+1).unwrap_or(0));
                     if first { queue_query(&ui,&mut state,&poll_sender); let _ = poll_sender.send(Command::Scan); }
                     else {state.query_due=Some(Instant::now());}
+                }
+                Event::AppearanceSaved(request) => {
+                    if request == state.appearance_request { state.appearance_pending = false; }
+                }
+                Event::SourceAdded(path, request) => {
+                    state.analysis_request = request;
+                    state.auto_analysis_request = Some(request);
+                    state.auto_analysis_path = Some(path.clone());
+                    state.analysis = None;
+                    state.space_node = 0;
+                    state.space_parents.clear();
+                    ui.set_page(6);
+                    ui.set_selected_id("".into());
+                    state.selected = None;
+                    state.checked.clear();
+                    ui.set_checked_count(0);
+                    let index = state.space_scopes.iter().enumerate().skip(1).find(|(_,scope)| scope.len() == 1 && path_key(&scope[0]) == path_key(&path)).map(|(index,_)| index).unwrap_or(0) as i32;
+                    if index != ui.get_space_index() { state.assigned_space_index = Some(index); }
+                    ui.set_space_index(index);
+                    ui.set_space_tiles(ModelRc::default());
+                    ui.set_space_bars(ModelRc::default());
+                    ui.set_space_bytes("".into());
+                    ui.set_space_can_up(false);ui.set_space_can_reveal(false);ui.set_space_can_view(false);ui.set_space_info("".into());
+                    ui.set_scanning(true);
+                    ui.set_space_summary(i18n::translate("索引刷新后自动分析新增目录…", ui.get_english()).into());
+                }
+                Event::SpaceStatus(message,request) => {
+                    if request == state.analysis_request {
+                        if message.starts_with("自动空间分析已取消") || message.starts_with("空间分析失败") { state.auto_analysis_request = None; state.auto_analysis_path = None; }
+                        ui.set_space_summary(i18n::translate(&message,ui.get_english()).into());
+                        ui.set_status(i18n::translate(&message,ui.get_english()).into());
+                    }
+                }
+                Event::Analysis(analysis,request) => {
+                    if request==state.analysis_request {
+                        state.auto_analysis_request = None;
+                        state.auto_analysis_path = None;
+                        state.space_node=0;state.space_parents.clear();
+                        if analysis.nodes[0].children.len()==1 {state.space_node=analysis.nodes[0].children[0];state.space_parents.push(0);}
+                        state.analysis=Some(analysis);ui.set_space_selected(-1);ui.set_space_can_reveal(false);ui.set_space_can_view(false);ui.set_space_info("".into());render_space(&ui,&state);
+                    }
                 }
                 Event::View { request, mut items, games, versions, stats } => {
                     if request != state.request { continue; }
@@ -1358,15 +2730,20 @@ pub fn run() -> Result<()> {
                         state.filters = new_filters;
                     }
                     state.versions = versions; state.games = games;
+                    update_space_scopes(&ui,&mut state);
+                    ui.set_filters(strings(std::iter::once(i18n::translate("全部游戏目录",ui.get_english())).chain(state.games.iter().map(|g|format!("{} · {}",g.name,display_path(&g.path)))).collect()));
                     ui.set_game_labels(strings(state.games.iter().map(|g| format!("{} · {}",g.ownership,display_path(&g.path))).collect()));
                     ui.set_version_labels(strings(state.versions.iter().map(|v| format!("{} · {}",v.name,display_path(&v.path))).collect()));
                     ui.set_counts(format!("{} 个来源 / {} 个版本 / {} 个游戏目录 / {} 张存档\n{} 个资源包 / {} 个模组 / {} 个光影包 / {} 个数据包",state.settings.sources.len(),stats.versions,stats.instances,stats.worlds,stats.resource_packs,stats.mods,stats.shader_packs,stats.data_packs).into());
                     ui.set_summary(format!("已索引世界逻辑大小：{}。包含缓存与可能的大小下限；世界和游戏目录大小不可相加。", bytes_label(Some(stats.world_bytes),false)).into());
+                    ui.set_counts(i18n::translate(&ui.get_counts(),ui.get_english()).into());ui.set_summary(i18n::translate(&ui.get_summary(),ui.get_english()).into());
+                    state.checked.retain(|id|items.iter().any(|i|&i.id==id));ui.set_checked_count(state.checked.len() as i32);
                     let rows=items.iter().map(|i| {let key=icon_key(i);EntryRow {
-                        id: i.id.clone().into(), title: format!("{}{}",if i.favorite {"★ "}else {""},i.name).into(), kind: i.kind.label().into(), owner: i.ownership.clone().into(),
-                        path: display_path(&i.path).into(), size: bytes_label(i.size,i.size_complete).into(),
-                        time: time_label(i.last_played_ms.or(i.modified_ms)).into(), available: i.available,
+                        id: i.id.clone().into(), title: format!("{}{}",if i.favorite {"★ "}else {""},i.name).into(), kind: i18n::translate(i.kind.label(),ui.get_english()).into(), owner: i18n::translate(&i.ownership,ui.get_english()).into(),
+                        path: display_path(&i.path).into(), size: i18n::translate(&bytes_label(i.size,i.size_complete),ui.get_english()).into(),
+                        time: i18n::translate(&time_label(i.last_played_ms.or(i.modified_ms)),ui.get_english()).into(), available: i.available,
                         icon: poll_icons.borrow().loaded.get(&key).cloned().flatten().unwrap_or_default(), icon_key:key.into(),
+                        checked:state.checked.contains(&i.id),
                     }}).collect::<Vec<_>>();
                     state.row_positions=items.iter().enumerate().map(|(n,i)|(i.id.clone(),n)).collect();
                     poll_icons.borrow_mut().sources=items.iter().map(|i|(i.id.clone(),IconRequest{id:i.id.clone(),key:icon_key(i),path:i.path.clone(),kind:i.kind.clone(),icon:i.icon.clone()})).collect();
@@ -1388,8 +2765,8 @@ pub fn run() -> Result<()> {
                     else if !ui.get_selected_id().is_empty() { ui.set_selected_id("".into()); state.selected = None; }
                     state.items = items;
                 }
-                Event::Status(message) => ui.set_status(message.into()),
-                Event::Progress(progress,message) => { ui.set_progress(progress); ui.set_status(message.into()); }
+                Event::Status(message) => {ui.set_status(i18n::translate(&message,ui.get_english()).into());state.raw_status=message;},
+                Event::Progress(progress,message) => { ui.set_progress(progress); ui.set_status(i18n::translate(&message,ui.get_english()).into());state.raw_status=message; }
                 Event::Scanning(scanning) => { ui.set_scanning(scanning); if !scanning { ui.set_progress(0.0); } else {poll_icons.borrow_mut().loaded.retain(|_,icon|icon.is_some());} }
                 Event::Dirty => { if state.query_due.is_none() { state.query_due = Some(Instant::now() + Duration::from_millis(100)); } }
                 Event::Warning(warning) => { state.diagnostics.push(warning); if state.diagnostics.len() > 100 { state.diagnostics.remove(1); } }
@@ -1401,11 +2778,18 @@ pub fn run() -> Result<()> {
                 Event::Browse(field,path) => match field {
                     0 => { ui.set_edit_executable(display_path(&path).into()); if ui.get_edit_workdir().is_empty() && let Some(parent) = path.parent() { ui.set_edit_workdir(display_path(parent).into()); } }
                     1 => ui.set_edit_workdir(display_path(&path).into()),
+                    3 => {
+                        ui.set_mapping_script(display_path(&path).into());
+                        if ui.get_mapping_script_workdir().is_empty() && let Some(parent) = path.parent() {
+                            ui.set_mapping_script_workdir(display_path(parent).into());
+                        }
+                    }
+                    4 => ui.set_mapping_script_workdir(display_path(&path).into()),
                     _ => ui.set_edit_java(display_path(&path).into()),
                 },
                 Event::EditorSaved => { ui.set_editor_visible(false); ui.set_mapping_visible(false); launch_info(&ui,&state); }
                 Event::SourcesChanged => { let _ = poll_sender.send(Command::Scan); }
-                Event::Duplicates(items, summary) => {state.duplicate_items=items;ui.set_duplicate_summary(summary.into());state.query_due=Some(Instant::now());}
+                Event::Duplicates(items, summary) => {state.duplicate_items=items;ui.set_duplicate_summary(i18n::translate(&summary,ui.get_english()).into());state.query_due=Some(Instant::now());}
                 Event::RowIcon(id,key,pixels) => {
                     let icon=pixels.map(|(pixels,width,height)|slint::Image::from_rgba8(slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(&pixels,width,height)));
                     { let mut cache=poll_icons.borrow_mut();cache.pending.remove(&key);
@@ -1418,18 +2802,28 @@ pub fn run() -> Result<()> {
                         ui.set_has_icon(icon.is_some());if let Some(icon)=icon {ui.set_detail_icon(icon);}
                     }
                 }
+                Event::OperationPrepared(plan, signature) => {if ui.get_operation_visible() && operation_signature(&ui,&state.operation_ids)==signature {ui.set_operation_preview(plan.preview_localized(ui.get_english()).into());ui.set_operation_ready(true);state.operation_plan=Some(*plan);ui.set_status(i18n::translate("预览已生成；核对真实路径并勾选确认后才能执行",ui.get_english()).into());}}
+                Event::OperationError(message) => {ui.set_operation_ready(false);state.operation_plan=None;ui.set_operation_preview(i18n::translate(&message,ui.get_english()).into());ui.set_status(i18n::translate(&message,ui.get_english()).into());state.diagnostics.push(message);}
+                Event::OperationHistory(history) => {ui.set_operation_history(i18n::translate(&history,ui.get_english()).into());state.raw_history=history;},
+                Event::OperationBrowse(field,path) => {if field==1{ui.set_operation_backup(display_path(&path).into());}else{ui.set_operation_parent(display_path(&path).into());}}
+                Event::OperationFinished => {ui.set_operation_visible(false);ui.set_operation_ready(false);state.operation_plan=None;state.query_due=Some(Instant::now());},
             }
         }
         { let mut cache=poll_icons.borrow_mut(); while let Some(request)=cache.deferred.pop_front() {
             match icon_sender.try_send(request) {Ok(())=>(),Err(mpsc::TrySendError::Full(request))=>{cache.deferred.push_front(request);break;},Err(mpsc::TrySendError::Disconnected(request))=>{cache.pending.remove(&request.key);} }
         } }
-        ui.set_diagnostics(state.diagnostics.join("\n\n").into());
+        ui.set_diagnostics(state.diagnostics.iter().map(|d|i18n::translate(d,ui.get_english())).collect::<Vec<_>>().join("\n\n").into());
+        if state.close_requested && !ui.get_scanning(){let _=slint::quit_event_loop();return;}
         if state.query_due.is_some_and(|due| Instant::now() >= due) { queue_query(&ui,&mut state,&poll_sender); }
     });
     #[cfg(feature = "ui-smoke")]
     let _smoke_timer = crate::ui_smoke::start(&ui);
     #[cfg(feature = "ui-smoke")]
     let _stage2_smoke_timer = crate::ui_stage2_smoke::start(&ui);
+    #[cfg(feature = "ui-smoke")]
+    let _stage3_smoke_timer = crate::ui_stage3_smoke::start(&ui);
+    #[cfg(feature = "ui-smoke")]
+    let _stage4_smoke_timer = crate::ui_stage4_smoke::start(&ui);
     ui.run()?;
     cancel.store(true, Ordering::SeqCst);
     timer.stop();

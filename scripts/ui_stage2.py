@@ -1,11 +1,10 @@
-"""Stage 2 native UI exercise + restart verification over generated local data.
+"""阶段 2 原生界面及重启验收，仅使用本地生成的数据。
 
-Run after building with --features ui-smoke:
+使用 --features ui-smoke 构建后运行：
     E:\\python\\python.exe scripts/ui_stage2.py target/debug/minecraft-explorer.exe
 
-Uses Pillow and psutil. No mouse/keyboard input is sent to Windows. Screenshots
-come from the application's own Slint software renderer. The launcher fixture
-is an inert file and is saved as a configuration only, never executed.
+使用 Pillow 和 psutil，不向 Windows 发送鼠标或键盘输入。
+截图来自本程序的 Slint 软件渲染器；启动器测试文件仅保存为配置，不执行。
 """
 import ctypes
 from ctypes import wintypes as w
@@ -51,6 +50,7 @@ def pack(path, description, fields, color):
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("pack.mcmeta", json.dumps(metadata))
         archive.writestr("pack.png", png(color))
+        archive.writestr("data/stage2/fixture.json", b"{}")
         archive.writestr("unread/test.bin", b"fixture content")
 
 

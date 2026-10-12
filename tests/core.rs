@@ -519,6 +519,7 @@ fn mapping_cross_root_and_missing_target_are_rejected() {
     );
     version.version_id = Some("id".into());
     let mut mapping = LaunchMapping {
+        script: None,
         subject_id: "world".into(),
         launcher_id: pcl.id.clone(),
         root: fixture.path().into(),
@@ -623,7 +624,7 @@ fn denied_directory_does_not_hide_other_sources() {
         .unwrap();
     assert!(status.success());
     let report = scan(vec![root(&denied), root(&allowed)]);
-    // Always restore the temporary fixture's ACL before asserting or dropping it.
+    // 断言或释放前始终恢复临时测试目录的访问控制。
     let restored = Command::new("icacls.exe")
         .arg(&denied)
         .args(["/remove:d", "*S-1-1-0"])

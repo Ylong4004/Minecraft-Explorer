@@ -1,4 +1,4 @@
-//! Opt-in native-window integration harness; never sends input to other applications.
+//! 显式启用的原生窗口测试，不向其他应用发送输入。
 use crate::AppWindow;
 use slint::{
     ComponentHandle, LogicalPosition, Model, Timer, TimerMode,
@@ -65,7 +65,7 @@ pub fn start(ui: &AppWindow) -> Option<Timer> {
                 }
                 assert_eq!(ui.get_entries().row_count(),if real {1} else {2},"incorrect search result count");
                 snapshot(&ui,&output,"world-search.png");
-                click(&ui,270.,215.);
+                crate::ui_stage2_smoke::native_select_first(&ui).unwrap();
             }
             2 => {
                 assert_eq!(ui.get_detail_title().as_str(),if real {"Roguelike Bio"} else {"冒险地图"});

@@ -1,4 +1,4 @@
-"""Preserve upstream license/notice files from the locked Windows Cargo graph."""
+"""根据锁定的 Windows Cargo 依赖图保留上游许可和归属原文。"""
 import json
 from pathlib import Path
 import re
@@ -63,8 +63,8 @@ for package in packages:
         target.mkdir(parents=True, exist_ok=True)
         (target / 'COPYRIGHT-NOTICES.txt').write_text('\n'.join(sorted(copyrights)) + '\n', encoding='utf-8')
     if not texts:
-        # Some published crates omit workspace-owned license files. Preserve their
-        # exact package declaration and require reviewed upstream texts to fill it.
+        # 部分发布包省略工作区许可文件；保留其
+        # 准确的包声明，并用已核查的上游原文补齐。
         fallback = Path(__file__).resolve().parent.parent / 'licenses' / 'upstream' / package['name']
         if fallback.is_dir():
             for file in fallback.iterdir():
@@ -75,7 +75,7 @@ for package in packages:
                     texts.append(output.relative_to(destination).as_posix())
         else:
             missing.append(package['name'] + ':' + str(package['license']))
-    # Keep the index compact; all recursive texts are present in the package directory.
+    # 索引保持精简，所有递归收集的原文都放在发行目录。
     links = ', '.join('[' + Path(t).name + '](' + t + ')' for t in texts[:4])
     if len(texts) > 4:
         links += ', [additional texts](' + relative.as_posix() + ')'

@@ -4,7 +4,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-/// Reject every reparse point in the path, including junctions (not only symlinks).
+/// 拒绝路径中的所有重解析点，包括目录联接和符号链接。
 pub fn checked_path(path: &Path) -> Result<PathBuf> {
     if !path.is_absolute() {
         bail!("请选择绝对路径：{}", path.display());
@@ -96,8 +96,8 @@ pub fn reveal(path: &Path) -> Result<()> {
             },
             UI::Shell::{SHOpenFolderAndSelectItems, SHParseDisplayName},
         };
-        // Native PIDL selection avoids explorer's command-line quoting/commas entirely.
-        // COM and PIDL lifetimes remain on this background thread.
+        // 用原生 PIDL 定位，避免资源管理器命令行的引号和逗号歧义。
+        // COM 和 PIDL 的生命周期均留在当前后台线程。
         unsafe {
             let init = CoInitializeEx(ptr::null(), COINIT_APARTMENTTHREADED as u32);
             if init < 0 && init != 0x80010106u32 as i32 {
