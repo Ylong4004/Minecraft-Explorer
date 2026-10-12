@@ -1,5 +1,15 @@
 # 测试记录
 
+## 1.0.1 — PCL 脚本自动识别，2026-10-12
+
+本轮 `cargo test --test launch_scripts --test i18n` 的 9 项通过：脚本组由 3 项增至 6 项，新增严格目标匹配、可复用的独立副本、原脚本随后改变不影响关联，以及其他目录、变量、注释、歧义命令、编辑过的副本和非 PCL 安装的拒绝。当前源码 `cargo clippy --all-targets --all-features -- -D warnings` 通过；上轮完整 106 项为 1.0.0 的历史记录，不混作本轮完整套件结果。
+
+原生界面 `ui-stage2-ed0eb7da` 完整流程与 5 项重启检查通过。新增自动检测、缓存副本字节一致、原脚本覆盖后的稳定性、自动关联保存回读，以及待检测时手动输入仍保留；既有内容图标、收藏、监控和无害脚本执行继续通过。所有输入只到本程序窗口，假启动器没有运行；自动识别的 Java 命令从未执行，另执行的 CMD 只写测试标记。真实游戏、启动器及账号均未运行或改写，原生成游戏夹具与假 EXE 哈希不变。UI 为 Debug 功能验收，不作为发布速度指标。
+
+只读检查用户机器上固定路径中的脚本目标字段，CE 上次版本“哈比列车”与截图目标“1.20.1-Fabric 0.16.10”不同；不匹配时程序提示先在原启动器启动目标一次。没有输出登录字段，也没有复制真实用户脚本到测试目录。识别格式边界与自动脚本的本地保管见 [接口核查](LAUNCHER_RESEARCH.md)。
+
+最终普通 `cargo build --release --bins`、格式检查和 Clippy 均通过。EXE **22,299,136 B（21.27 MiB）**，产品及文件版本 **1.0.1**，网站文件名仍为 `MinecraftExplorer-1.0-win-x64.exe`。SHA256：`986FDCBD3F5EC49DEDD02A0D62DD912EEAB048F7847C9C193A3AF22042526213`。`release-b5ddfdac` 独立缓存启动、七尺寸资源图标与窗口图标、完整内置许可、四个测试入口不存在、SQLite v2 和正常关闭通过，首次响应 0.55 s，无启动超时，10 次连续响应最大 0.44 ms。网站 EXE 与普通构建逐字节一致，内置许可仍与收集的锁定依赖原文一致；依赖图未改变。
+
 ## 1.0.0 — Fimel 单 EXE 发行，2026-10-12
 
 `cargo test --all-targets --all-features -- --include-ignored` 的 **106 项集成测试通过**；新增 2 项覆盖单 EXE 内置许可、导出复用及拒绝覆盖不同内容。`cargo fmt --all --check`、`cargo clippy --all-targets --all-features -- -D warnings` 和普通 `cargo build --release --bins` 均通过。

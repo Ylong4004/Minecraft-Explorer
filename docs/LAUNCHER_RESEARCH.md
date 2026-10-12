@@ -1,5 +1,13 @@
 # 启动器接口核查
 
+## 1.0.1 自动识别既有脚本（2026-10-12）
+
+用户要求减少手工设置。只读核对本机 PCL CE 的上次脚本：UTF-8 编码、直接引用 Java EXE，包含明文目标 `--version` 和 `--gameDir`。核对时只输出这两个非登录字段；没有打印登录参数。此次 CE 上次目标为“哈比列车”，PCL2 上次目标为“1.21.11-Fabric 0.18.4”，均不是用户截图的“1.20.1-Fabric 0.16.10”。没有实际启动 Minecraft。
+
+新实现利用已核对的固定脚本位置，在映射对话框中严格匹配版本和目录，匹配后保存独立本地副本并自动填写。复制保留原始字节与原安装工作目录，不产生账号、令牌或猜测原生启动参数；不匹配时需要用户先在原启动器运行目标版本一次。存在手动输入时不覆盖，切换目标后的旧回执被丢弃。对应功能是脚本发现和关联，原生启动器外部接口能力仍是 OpenLauncher。
+
+下文“不自动发现”“不解析脚本”为旧版本的历史行为；1.0.1 只解析目标标识及目录字段，不读取账号配置、不处理登录参数。参考 [PCL 官方自定义事件文档](https://github.com/Meloong-Git/PCL/wiki/自定义事件)，其中明确说明 LatestLaunch.bat 保存上次启动脚本。
+
 ## 0.4.1 再核查与用户绑定脚本（2026-10-12）
 
 再次读取当前 [PCL 启动入口](https://github.com/Meloong-Git/PCL/blob/main/Plain%20Craft%20Launcher%202/Application.xaml.vb)、[PCL CE StartupService](https://github.com/PCL-Community/PCL-CE/blob/dev/PCL.Core/App/Essentials/StartupService.cs) 与 [HMCL UpdateHandler](https://github.com/HMCL-dev/HMCL/blob/main/HMCL/src/main/java/org/jackhuang/hmcl/upgrade/UpdateHandler.java)，仍未确认可以指定根目录及版本、并实测启动游戏的外部入口；原生适配器能力保持 OpenLauncher。

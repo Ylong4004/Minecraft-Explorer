@@ -1,4 +1,4 @@
-# Minecraft Explorer 1.0.0
+# Minecraft Explorer 1.0.1
 
 Download the single `MinecraftExplorer-1.0-win-x64.exe` from the [Fimel project page](https://studiofimel.com/#/works/minecraft-explorer). [Source code and issues](https://github.com/Ylong4004/Minecraft-Explorer). The app embeds its icons, project MIT license and third-party license texts. Settings → About → Export third-party licenses saves them to the app data directory for offline reading.
 
@@ -39,3 +39,7 @@ Size scanning reuses completed directory subtree totals across instances, worlds
 App settings and indexes are stored in `%LOCALAPPDATA%\MinecraftExplorer\index.db`, or the directory specified by `MINECRAFT_EXPLORER_DATA`. Operation history is stored beside it under `operations`. Scanning, previews, analysis and duplicate detection do not write game files.
 
 See [testing](TESTING.md), [architecture](ARCHITECTURE.md), [launcher research](LAUNCHER_RESEARCH.md) and [licenses](THIRD_PARTY.md). The app's original source is [MIT licensed](../LICENSE); distribution includes Slint attribution and upstream notices.
+
+## Automatic PCL script detection (1.0.1)
+
+Launch the intended version once in PCL2 or PCL CE. Set mapping automatically checks the selected installation’s PCL/LatestLaunch.bat and requires an exact version and game-directory match. A separate copy is saved under the app data launch-scripts directory, keeping a later game launch from replacing the linked script. Review and save the mapping; Auto-detect retries or refreshes a copy after login expires. Manual entries are preserved. Detection handles the verified UTF-8 direct Java command format, refuses ambiguous or variable-based target arguments, and does not parse or refresh login parameters. HMCL and other formats continue to use manual exported scripts. Copies may include the original login parameters; keep them private.

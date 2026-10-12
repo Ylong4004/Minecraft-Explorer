@@ -1,6 +1,6 @@
 # Minecraft Explorer
 
-Windows 原生 Minecraft Java 存档与内容管理器，Rust + Slint + SQLite。当前版本 **1.0.0**，支持中英双语、深浅主题、内容索引、备份和空间分析。PCL2、HMCL、PCL CE 支持打开启动器；可另外绑定某个版本的 BAT / CMD 启动脚本。[English documentation](docs/README.en.md)
+Windows 原生 Minecraft Java 存档与内容管理器，Rust + Slint + SQLite。当前版本 **1.0.1**，支持中英双语、深浅主题、内容索引、备份和空间分析。PCL2、HMCL、PCL CE 支持打开启动器；可另外绑定某个版本的 BAT / CMD 启动脚本。[English documentation](docs/README.en.md)
 
 [Fimel 作品与下载](https://studiofimel.com/#/works/minecraft-explorer) · [GitHub 源码与问题反馈](https://github.com/Ylong4004/Minecraft-Explorer)
 
@@ -21,9 +21,11 @@ Windows 原生 Minecraft Java 存档与内容管理器，Rust + Slint + SQLite�
 - **打开所选启动器**：打开原程序，然后在启动器里手动选择详情提示的版本，由它正常登录和管理运行参数。
 - **启动关联脚本**：为这个版本准备启动器生成的 BAT / CMD，在“设置关联”中选择脚本和工作目录，保存后点击此按钮。没有脚本时按钮不可用。
 
+**PCL2 / PCL CE 自动识别（1.0.1）**：先在原启动器启动目标版本一次，打开“设置关联”会自动检查所选安装的 `PCL/LatestLaunch.bat`。只有 `--version` 与 `--gameDir` 都准确匹配才会填入；程序将原脚本保存为数据目录 `launch-scripts/` 中的独立副本，不会随下一次启动覆盖。核对后点“保存关联”，即可使用“启动关联脚本”。可点“自动识别”重试或更新失效副本；已有手动脚本不会被后台结果覆盖。识别只支持已核对的 PCL UTF-8 直接 Java 命令格式；其他编码、变量或无法判断的格式继续手动选择。
+
 如果启动器提供生成/导出启动脚本功能，请选择目标版本导出。PCL 的 `LatestLaunch.bat` 记录上一次游戏启动：先确认上次启动的是目标版本，再另存为该版本专用文件；不要直接绑定会被其他版本覆盖的 `LatestLaunch.bat`。复制脚本后，如包含相对路径，应将工作目录设为原启动器所用的目录；不填时默认使用脚本所在目录。
 
-本程序通过 Windows 执行用户指定的文件，不解析脚本、不读取或刷新其中的登录信息。脚本可能含有敏感登录参数，请自行保管，不要分享；登录失效、Java 或路径变化时，回到原启动器重新生成并绑定。脚本退出成功不证明游戏已经启动，请查看游戏窗口或脚本日志。清空脚本路径再保存可取消绑定；更换目标版本会清空脚本字段，需要重新选择。
+本程序通过 Windows 执行用户指定的文件。自动识别只解析版本与游戏目录字段，不解析、展示或刷新登录参数。脚本可能含有敏感登录参数，请自行保管，不要分享；登录失效、Java 或路径变化时，回到原启动器重新生成并绑定。脚本退出成功不证明游戏已经启动，请查看游戏窗口或脚本日志。清空脚本路径再保存可取消绑定；更换目标版本会清空脚本字段，需要重新选择。
 
 脚本入口与启动器原生指定版本接口是不同能力。当前仍没有经过真实验证的 PCL2 / PCL CE / HMCL 指定实例外部 CLI，详见 [接口核查与脚本说明](docs/LAUNCHER_RESEARCH.md)。实际 Minecraft 启动仍需用用户自己的版本脚本验收。
 
@@ -111,4 +113,4 @@ cargo build --release
 
 项目新编写源码为 MIT；Slint 采用 Royalty-free 2.0，设置 → 关于包含实际 `AboutSlint` 控件，发行包保留许可与归属。详见 [许可说明](docs/THIRD_PARTY.md)、[架构](docs/ARCHITECTURE.md)、[测试](docs/TESTING.md)、[阶段记录](docs/DEVELOPMENT.md)。
 
-单文件 EXE 内置项目 MIT 及依赖许可原文。在 **设置 → 关于 → 导出第三方许可** 中，程序在自己的数据目录创建 `MinecraftExplorer-1.0.0-licenses.txt` 并定位该文件；双击即可查看。仅在主动导出时创建，不写入游戏目录，也不覆盖已有不同内容的文件。依赖变化后，重新运行许可收集及 `scripts/embed_licenses.py <收集目录>`，更新内置资源后再构建发行版。
+单文件 EXE 内置项目 MIT 及依赖许可原文。在 **设置 → 关于 → 导出第三方许可** 中，程序在自己的数据目录创建 `MinecraftExplorer-1.0.1-licenses.txt` 并定位该文件；双击即可查看。仅在主动导出时创建，不写入游戏目录，也不覆盖已有不同内容的文件。依赖变化后，重新运行许可收集及 `scripts/embed_licenses.py <收集目录>`，更新内置资源后再构建发行版。

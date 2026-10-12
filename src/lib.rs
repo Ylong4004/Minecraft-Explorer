@@ -3,6 +3,7 @@ pub mod discovery;
 pub mod duplicates;
 pub mod i18n;
 pub mod index;
+pub mod launch_scripts;
 pub mod launcher;
 pub mod licenses;
 pub mod minecraft;

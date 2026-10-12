@@ -520,7 +520,66 @@ impl Run {
                 }
                 self.capture(ui, "final-favorite")?;
                 self.checks.push("annotation_readback_after_refresh".into());
+                let pcl = self
+                    .fixture
+                    .pcl_ce
+                    .parent()
+                    .context("fixture launcher parent")?
+                    .join("PCL");
+                fs::create_dir_all(&pcl)?;
+                fs::write(
+                    pcl.join("LatestLaunch.bat"),
+                    format!(
+                        "@echo off\r\n\"C:\\Fixture Java\\bin\\javaw.exe\" --version stage2-fixture --gameDir \"{}\" --accessToken fixture-only\r\n",
+                        minecraft_explorer::platform::display_path(&self.fixture.root)
+                    ),
+                )?;
                 ui.invoke_begin_mapping();
+                self.advance("matching_generated_last_launch_script_auto_detection_requested");
+            }
+            26 => {
+                if ui.get_mapping_script().is_empty() {
+                    return Ok(false);
+                }
+                ensure!(
+                    ui.get_mapping_script_notice().contains("已识别匹配脚本"),
+                    "matching auto script notice missing"
+                );
+                let snapshot = PathBuf::from(ui.get_mapping_script().as_str());
+                ensure!(
+                    snapshot.starts_with(self.fixture.cache.join("launch-scripts")),
+                    "auto script was not saved in isolated app data"
+                );
+                let source = self
+                    .fixture
+                    .pcl_ce
+                    .parent()
+                    .unwrap()
+                    .join("PCL/LatestLaunch.bat");
+                let original = fs::read(&source)?;
+                ensure!(
+                    fs::read(&snapshot)? == original,
+                    "auto copy differs from matched source"
+                );
+                fs::write(&source, "@echo off\r\nexit /b 0\r\n")?;
+                ensure!(
+                    fs::read(&snapshot)? == original,
+                    "mutable source changed the saved script"
+                );
+                self.capture(ui, "auto-script-binding")?;
+                ui.invoke_save_mapping();
+                self.advance("auto_detected_script_is_stable_and_saved_without_running_minecraft");
+            }
+            27 => {
+                if ui.get_mapping_visible() || !ui.get_can_launch_script() {
+                    return Ok(false);
+                }
+                ui.invoke_begin_mapping();
+                ensure!(
+                    ui.get_mapping_script().contains("launch-scripts"),
+                    "auto script mapping was not restored"
+                );
+                ui.invoke_discover_script();
                 ui.set_mapping_script(
                     self.output
                         .join("chosen & (fixture).cmd")
@@ -537,7 +596,7 @@ impl Run {
                 ui.invoke_save_mapping();
                 self.advance("script_mapping_dialog_and_save");
             }
-            26 => {
+            28 => {
                 if ui.get_mapping_visible() || !ui.get_can_launch_script() {
                     return Ok(false);
                 }
@@ -550,7 +609,7 @@ impl Run {
                 ui.invoke_launch_script();
                 self.advance("script_mapping_readback_and_launch_callback");
             }
-            27 => {
+            29 => {
                 if !self.output.join("script-ran.marker").exists() {
                     return Ok(false);
                 }

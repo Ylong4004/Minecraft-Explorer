@@ -132,6 +132,8 @@ export component AppWindow inherits Window {
     in property <bool> can-launch-script;
     in-out property <string> mapping-script;
     in-out property <string> mapping-script-workdir;
+    in property <string> mapping-script-notice;
+    callback discover-script();
     in property <string> target-name;
     in-out property <int> launcher-index: 0;
     in property <[string]> launcher-labels;
@@ -531,19 +533,20 @@ export component AppWindow inherits Window {
             VerticalLayout { padding: 22px; spacing: 12px;
                 Text { text: I18n.text("关联所选条目 / 设置默认启动器"); color: Theme.shade(#ffffff, #182532); font-size: 21px; }
                 Label { text: I18n.text("手动映射保留真实游戏目录、根目录和具体版本 ID。共享存档请明确选择版本。"); wrap: word-wrap; }
-                ComboBox { model: root.launcher-labels; current-index <=> root.launcher-index; }
+                ComboBox { model: root.launcher-labels; current-index <=> root.launcher-index; selected(_) => { root.mapping-target-changed(); } }
                 ComboBox { model: root.version-labels; current-index <=> root.version-index; selected(_) => { root.mapping-target-changed(); } }
-                ComboBox { model: root.game-labels; current-index <=> root.mapping-game-index; }
+                ComboBox { model: root.game-labels; current-index <=> root.mapping-game-index; selected(_) => { root.mapping-target-changed(); } }
                 Label { text: I18n.text("可选：绑定启动器为这个版本导出的 BAT / CMD。留空时只打开启动器。"); wrap: word-wrap; }
                 HorizontalLayout {
                     LineEdit { text <=> root.mapping-script; placeholder-text: I18n.text("该版本的启动脚本路径"); }
                     Button { text: I18n.text("选择脚本"); clicked => { root.browse-editor(3); } }
+                    Button { text: I18n.text("自动识别"); enabled: !root.scanning; clicked => { root.discover-script(); } }
                 }
                 HorizontalLayout {
                     LineEdit { text <=> root.mapping-script-workdir; placeholder-text: I18n.text("脚本工作目录（默认脚本所在目录）"); }
                     Button { text: I18n.text("选择工作目录"); clicked => { root.browse-editor(4); } }
                 }
-                Label { text: I18n.text("请确认脚本启动的是上方版本；本程序不读取或更新脚本内的登录信息。"); wrap: word-wrap; }
+                Label { text: root.mapping-script-notice; wrap: word-wrap; }
                 HorizontalLayout {
                     Button { text: I18n.text("保存关联"); clicked => { root.save-mapping(); } }
                     Button { text: I18n.text("清除关联"); clicked => { root.clear-mapping(); } }
@@ -586,7 +589,7 @@ export component AppWindow inherits Window {
         TouchArea { }
         Rectangle { width: 440px; height: 390px; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; background: Theme.shade(#202b3a, #f8fafc); border-radius: 9px;
             VerticalLayout { padding: 22px; spacing: 12px;
-                Text { text: "Minecraft Explorer 1.0.0"; color: Theme.shade(#ffffff, #182532); font-size: 21px; }
+                Text { text: "Minecraft Explorer 1.0.1"; color: Theme.shade(#ffffff, #182532); font-size: 21px; }
                 Label { text: I18n.text("本地内容与安全文件管理"); }
                 AboutSlint { }
                 Label { text: I18n.text("许可原文已嵌入程序；导出后在资源管理器中双击查看。"); wrap: word-wrap; }

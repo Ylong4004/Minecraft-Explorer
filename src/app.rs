@@ -46,6 +46,7 @@ enum Command {
     Reveal(String),
     RevealPath(PathBuf),
     ExportLicenses,
+    DiscoverScript(String, String, String, PathBuf, String, u64),
     Copy(String),
     Detail(String),
     Browse(i32),
@@ -70,6 +71,7 @@ enum Command {
 enum Event {
     Settings(Settings),
     AppearanceSaved(u64),
+    ScriptDiscovered(Option<LaunchScript>, String, String, u64),
     SourceAdded(PathBuf, u64),
     Analysis(space::Analysis, u64),
     SpaceStatus(String, u64),
@@ -100,6 +102,8 @@ enum Event {
 
 #[derive(Default)]
 struct UiState {
+    script_request: u64,
+    script_initial: (String, String),
     settings: Settings,
     appearance_request: u64,
     appearance_pending: bool,
@@ -934,6 +938,42 @@ fn worker(
                             "已导出许可文件，请在资源管理器中双击查看".into(),
                         ));
                     }
+                    Command::DiscoverScript(
+                        subject_id,
+                        launcher_id,
+                        version_id,
+                        game_dir,
+                        signature,
+                        request,
+                    ) => {
+                        let result = (|| -> Result<Option<LaunchScript>> {
+                            let subject = index.get(&subject_id)?.context("所选条目已失效")?;
+                            let version = index.get(&version_id)?.context("目标版本已失效")?;
+                            let installation = settings
+                                .launchers
+                                .iter()
+                                .find(|l| l.id == launcher_id)
+                                .context("请选择启动器")?;
+                            let mapping = launcher::create_mapping(
+                                &subject,
+                                installation,
+                                &version,
+                                &game_dir,
+                            )?;
+                            minecraft_explorer::launch_scripts::discover(
+                                installation,
+                                &mapping,
+                                db.parent().context("数据目录缺失")?,
+                            )
+                        })();
+                        let (script, notice) = match result {
+                            Ok(Some(script)) => (Some(script), "已识别匹配脚本并保存独立副本；保存关联后可启动，登录失效时需在原启动器重新运行并识别。".to_string()),
+                            Ok(None) => (None, "未找到版本和游戏目录均匹配的 PCL 脚本。请先在所选启动器启动这个版本一次，再点自动识别；也可手动选择导出脚本。".to_string()),
+                            Err(_) => (None, "无法自动识别：请核对目标版本、游戏目录与启动器安装，或手动选择脚本。".to_string()),
+                        };
+                        let _ = events
+                            .send(Event::ScriptDiscovered(script, signature, notice, request));
+                    }
                     Command::Copy(text) => {
                         arboard::Clipboard::new()?.set_text(text)?;
                         let _ = events.send(Event::Status("已复制到剪贴板".into()));
@@ -1276,6 +1316,49 @@ fn detail(ui: &AppWindow, state: &UiState, item: &Item) {
     }
     launch_info(ui, state);
     ui.set_detail_text(i18n::translate(&ui.get_detail_text(), ui.get_english()).into());
+}
+
+fn script_signature(ui: &AppWindow, state: &UiState) -> Option<String> {
+    let launcher = selected_launcher(ui, state)?;
+    let version = state.versions.get(ui.get_version_index().max(0) as usize)?;
+    let game = state
+        .games
+        .get(ui.get_mapping_game_index().max(0) as usize)?;
+    Some(format!(
+        "{}|{}|{}|{}",
+        ui.get_selected_id(),
+        launcher.id,
+        version.id,
+        path_key(&game.path)
+    ))
+}
+
+fn queue_script_discovery(ui: &AppWindow, state: &mut UiState, sender: &mpsc::Sender<Command>) {
+    if !ui.get_mapping_visible() {
+        return;
+    }
+    let Some(signature) = script_signature(ui, state) else {
+        return;
+    };
+    state.script_request += 1;
+    state.script_initial = (
+        ui.get_mapping_script().to_string(),
+        ui.get_mapping_script_workdir().to_string(),
+    );
+    let launcher = selected_launcher(ui, state).unwrap();
+    let version = &state.versions[ui.get_version_index().max(0) as usize];
+    let game = &state.games[ui.get_mapping_game_index().max(0) as usize];
+    ui.set_mapping_script_notice(
+        i18n::translate("正在检查所选启动器的上次启动脚本…", ui.get_english()).into(),
+    );
+    let _ = sender.send(Command::DiscoverScript(
+        ui.get_selected_id().to_string(),
+        launcher.id.clone(),
+        version.id.clone(),
+        game.path.clone(),
+        signature,
+        state.script_request,
+    ));
 }
 
 fn selected_launcher<'a>(ui: &AppWindow, state: &'a UiState) -> Option<&'a LauncherInstallation> {
@@ -2205,15 +2288,21 @@ pub fn run() -> Result<()> {
         }
     });
     let target_ui = weak.clone();
+    let target_state = state.clone();
+    let target_discovery = sender.clone();
     ui.on_mapping_target_changed(move || {
         if let Some(ui) = target_ui.upgrade() {
             ui.set_mapping_script("".into());
             ui.set_mapping_script_workdir("".into());
+            if let Ok(mut state) = target_state.try_borrow_mut() {
+                queue_script_discovery(&ui, &mut state, &target_discovery);
+            }
         }
     });
+    let begin_discovery = sender.clone();
     ui.on_begin_mapping(move || {
         if let Some(ui) = map_ui.upgrade() {
-            let state = begin_map_state.borrow();
+            let mut state = begin_map_state.borrow_mut();
             ui.set_mapping_script("".into());
             ui.set_mapping_script_workdir("".into());
             if let Some(item) = &state.selected {
@@ -2246,6 +2335,25 @@ pub fn run() -> Result<()> {
                 }
             }
             ui.set_mapping_visible(true);
+            if ui.get_mapping_script().is_empty() {
+                queue_script_discovery(&ui, &mut state, &begin_discovery);
+            } else {
+                ui.set_mapping_script_notice(
+                    i18n::translate(
+                        "已有脚本关联；自动识别不会覆盖手动填写的脚本。",
+                        ui.get_english(),
+                    )
+                    .into(),
+                );
+            }
+        }
+    });
+    let discovery_ui = weak.clone();
+    let discovery_state = state.clone();
+    let discovery_sender = sender.clone();
+    ui.on_discover_script(move || {
+        if let Some(ui) = discovery_ui.upgrade() {
+            queue_script_discovery(&ui, &mut discovery_state.borrow_mut(), &discovery_sender);
         }
     });
     let map_state = state.clone();
@@ -2674,6 +2782,19 @@ pub fn run() -> Result<()> {
                 }
                 Event::AppearanceSaved(request) => {
                     if request == state.appearance_request { state.appearance_pending = false; }
+                }
+                Event::ScriptDiscovered(script, signature, notice, request) => {
+                    if ui.get_mapping_visible() && request == state.script_request && script_signature(&ui, &state).as_ref() == Some(&signature) {
+                        if (ui.get_mapping_script().to_string(), ui.get_mapping_script_workdir().to_string()) != state.script_initial {
+                            ui.set_mapping_script_notice(i18n::translate("手动填写的脚本或工作目录已保留。", ui.get_english()).into());
+                            continue;
+                        }
+                        if let Some(script) = script {
+                            ui.set_mapping_script(display_path(&script.path).into());
+                            ui.set_mapping_script_workdir(display_path(&script.working_dir).into());
+                        }
+                        ui.set_mapping_script_notice(i18n::translate(&notice, ui.get_english()).into());
+                    }
                 }
                 Event::SourceAdded(path, request) => {
                     state.analysis_request = request;

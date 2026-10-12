@@ -65,6 +65,101 @@ fn binding_persists_and_older_mappings_have_no_script() {
     );
 }
 
+fn pcl_script(mapping: &LaunchMapping) -> String {
+    format!(
+        "@echo off\r\n\"C:\\Fixture Java\\bin\\javaw.exe\" --version \"{}\" --gameDir \"{}\" --accessToken fixture-only\r\n",
+        mapping.version_id,
+        minecraft_explorer::platform::display_path(&mapping.game_dir)
+    )
+}
+
+#[test]
+fn auto_detection_checks_target_and_keeps_a_stable_local_copy() {
+    let directory = tempfile::tempdir().unwrap();
+    let (mut installation, _, mapping) = fixture(directory.path());
+    installation.kind = LauncherKind::PclCe;
+    fs::create_dir_all(directory.path().join("PCL")).unwrap();
+    let original = directory.path().join("PCL/LatestLaunch.bat");
+    let content = pcl_script(&mapping);
+    fs::write(&original, &content).unwrap();
+    let data = directory.path().join("app-data");
+    fs::create_dir(&data).unwrap();
+    let found = minecraft_explorer::launch_scripts::discover(&installation, &mapping, &data)
+        .unwrap()
+        .unwrap();
+    assert_eq!(found.working_dir, checked_path(directory.path()).unwrap());
+    assert!(found.path.starts_with(checked_path(&data).unwrap()));
+    assert_eq!(fs::read(&found.path).unwrap(), content.as_bytes());
+    let repeated = minecraft_explorer::launch_scripts::discover(&installation, &mapping, &data)
+        .unwrap()
+        .unwrap();
+    assert_eq!(found.path, repeated.path);
+    fs::write(
+        &original,
+        content.replace("--version \"chosen\"", "--version \"other-version\""),
+    )
+    .unwrap();
+    assert!(
+        minecraft_explorer::launch_scripts::discover(&installation, &mapping, &data)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(fs::read(&found.path).unwrap(), content.as_bytes());
+}
+
+#[test]
+fn auto_detection_rejects_other_directories_variables_comments_and_ambiguity() {
+    let directory = tempfile::tempdir().unwrap();
+    let (installation, _, mapping) = fixture(directory.path());
+    fs::create_dir_all(directory.path().join("PCL")).unwrap();
+    let original = directory.path().join("PCL/LatestLaunch.bat");
+    let data = directory.path().join("app-data");
+    fs::create_dir(&data).unwrap();
+    let content = pcl_script(&mapping);
+    let game = minecraft_explorer::platform::display_path(&mapping.game_dir);
+    for invalid in [
+        content.replace(
+            &game,
+            &minecraft_explorer::platform::display_path(&installation.root),
+        ),
+        content.replace(&game, "%GAME_DIRECTORY%"),
+        content.replace("\"C:\\Fixture", "rem \"C:\\Fixture"),
+        content.replace("--version", "--version other --version"),
+        format!("{content}{content}"),
+    ] {
+        fs::write(&original, invalid).unwrap();
+        assert!(
+            minecraft_explorer::launch_scripts::discover(&installation, &mapping, &data)
+                .unwrap()
+                .is_none()
+        );
+        assert!(!data.join("launch-scripts").exists());
+    }
+}
+
+#[test]
+fn auto_detection_does_not_overwrite_edited_snapshots_or_scan_unrelated_launchers() {
+    let directory = tempfile::tempdir().unwrap();
+    let (mut installation, _, mapping) = fixture(directory.path());
+    fs::create_dir_all(directory.path().join("PCL")).unwrap();
+    let original = directory.path().join("PCL/LatestLaunch.bat");
+    fs::write(&original, pcl_script(&mapping)).unwrap();
+    let data = directory.path().join("app-data");
+    fs::create_dir(&data).unwrap();
+    let found = minecraft_explorer::launch_scripts::discover(&installation, &mapping, &data)
+        .unwrap()
+        .unwrap();
+    fs::write(&found.path, "user content").unwrap();
+    assert!(minecraft_explorer::launch_scripts::discover(&installation, &mapping, &data).is_err());
+    assert_eq!(fs::read_to_string(&found.path).unwrap(), "user content");
+    installation.kind = LauncherKind::Hmcl;
+    assert!(
+        minecraft_explorer::launch_scripts::discover(&installation, &mapping, &data)
+            .unwrap()
+            .is_none()
+    );
+}
+
 #[test]
 fn invalid_script_and_cross_root_binding_are_rejected() {
     let directory = tempfile::tempdir().unwrap();

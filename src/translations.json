@@ -1,4 +1,11 @@
 {
+  "手动填写的脚本或工作目录已保留。": "Your manually entered script or working directory was kept.",
+  "自动识别": "Auto-detect",
+  "正在检查所选启动器的上次启动脚本…": "Checking the selected launcher's last launch script…",
+  "已有脚本关联；自动识别不会覆盖手动填写的脚本。": "A script is already linked. Automatic detection keeps manually entered scripts.",
+  "已识别匹配脚本并保存独立副本；保存关联后可启动，登录失效时需在原启动器重新运行并识别。": "A matching script was saved as a separate copy. Save the mapping to use it. Launch in the original launcher and detect again if login expires.",
+  "未找到版本和游戏目录均匹配的 PCL 脚本。请先在所选启动器启动这个版本一次，再点自动识别；也可手动选择导出脚本。": "No PCL script matches both version and game directory. Launch this version once in the selected launcher, then click Auto-detect, or select an exported script manually.",
+  "无法自动识别：请核对目标版本、游戏目录与启动器安装，或手动选择脚本。": "Auto-detection failed. Check the version, game directory and launcher installation, or select a script manually.",
   "空间与内容管理": "Storage & content management",
   "本地内容与安全文件管理": "Local content & file management",
   "许可原文已嵌入程序；导出后在资源管理器中双击查看。": "License texts are embedded. Export them, then open the selected file in Explorer.",
