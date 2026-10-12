@@ -4,6 +4,8 @@
 
 1.0.1 增加 PCL2/PCL CE 上次启动脚本的自动识别与独立副本，作为 1.0 系列修订发布。网站仍使用用户指定的 `MinecraftExplorer-1.0-win-x64.exe` 文件名，实际产品版本和页面版本标注为 1.0.1。
 
+`scripts/package.ps1` 在复制前核对 EXE 的 ProductVersion 与 Cargo 包版本；旧产物不能冒充新版本。打包完成后同步 `dist/MinecraftExplorer-1.0-win-x64.exe` 这一系列入口，默认包为 `dist/MinecraftExplorer/MinecraftExplorer.exe`。历史版本目录保留。该脚本使用 UTF-8 BOM，保证 Windows PowerShell 5.1 正确读取中文提示。
+
 网站分类为“插件与工具”，记录位于 Fimel 的 `public/works/catalogue.json`。概述、更新日志及版本页在 `public/works/minecraft-explorer/`，提供中英日正文；应用本身仅提供中文和英文。封面使用本项目原创图标，三张画廊图片为实际原生窗口显示的生成演示数据，不包含用户真实存档。
 
 网站下载只有 `public/plugins/minecraft-explorer/MinecraftExplorer-1.0-win-x64.exe`。发布文件来自普通 `cargo build --release --bins` 的主程序，不包含 `ui-smoke` 功能。单文件内置图标、SQLite、Slint 软件渲染器以及项目和上游许可文本；Windows 系统组件及 VC++ x64 运行库仍为系统依赖。
