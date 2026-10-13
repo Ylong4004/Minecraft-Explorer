@@ -623,9 +623,11 @@ fn worker(
                                     }
                                     let status = if report.cancelled {
                                         "扫描已取消；保留已读取结果，可刷新重试".to_string()
+                                    } else if report.warnings.is_empty() {
+                                        format!("扫描完成：{} 个条目", report.items.len())
                                     } else {
                                         format!(
-                                            "扫描完成：{} 个条目；{} 条诊断，逻辑大小（跳过链接）",
+                                            "扫描完成：{} 个条目；{} 项扫描问题",
                                             report.items.len(),
                                             report.warnings.len()
                                         )
@@ -785,9 +787,7 @@ fn worker(
                         settings = updated;
                         let _ = events.send(Event::Settings(settings.clone()));
                         let _ = events.send(Event::EditorSaved);
-                        let _ = events.send(Event::Status(
-                            "启动器配置已保存；OpenOnly：直接启动指定版本尚未验证".into(),
-                        ));
+                        let _ = events.send(Event::Status("启动器配置已保存".into()));
                     }
                     Command::RemoveLauncher(id) => {
                         settings.launchers.retain(|l| l.id != id);
@@ -813,6 +813,7 @@ fn worker(
                             launcher::validate_script(script)?;
                         }
                         mapping.script = script;
+                        let script_linked = mapping.script.is_some();
                         settings
                             .instance_defaults
                             .insert(subject.id.clone(), launcher_id.clone());
@@ -829,7 +830,12 @@ fn worker(
                         index.save_settings(&settings)?;
                         let _ = events.send(Event::Settings(settings.clone()));
                         let _ = events.send(Event::Status(
-                            "手动关联已保存；打开启动器后仍需手动选择目标版本".into(),
+                            if script_linked {
+                                "关联已保存，可使用“启动关联脚本”"
+                            } else {
+                                "关联已保存；可打开启动器并选择目标版本"
+                            }
+                            .into(),
                         ));
                         let _ = events.send(Event::EditorSaved);
                     }
@@ -872,7 +878,7 @@ fn worker(
                         index.record_opened(&subject_id)?;
                         let _ = events.send(Event::Dirty);
                         let _ = events.send(Event::Status(format!(
-                            "已运行关联脚本：{id}；请检查游戏窗口，未确认游戏进程",
+                            "已运行关联脚本：{id}；请检查游戏窗口",
                             id = mapping.version_id
                         )));
                     }
@@ -902,17 +908,19 @@ fn worker(
                         let mut child = launcher::spawn(&plan)
                             .context("打开所选安装失败；可手动切换同根目录的其他启动器后重试")?;
                         std::thread::sleep(Duration::from_millis(250));
-                        let message = match child.try_wait()? {
+                        let exit = child.try_wait()?;
+                        let failed = exit.as_ref().is_some_and(|exit| !exit.success());
+                        let message = match exit {
                             Some(exit) if !exit.success() => {
                                 format!(
-                                    "Failed：启动器立即退出，代码 {exit}；检查 Java 和安装文件，或手动切换同根目录的其他安装"
+                                    "启动器立即退出，代码 {exit}；请检查 Java 和安装文件，或切换同根目录的其他安装"
                                 )
                             }
-                            Some(_) => "启动器入口已退出；可能交给已有进程，未确认游戏启动".into(),
-                            None => "启动器进程已创建；请手动选择目标版本，未确认游戏启动".into(),
+                            Some(_) => "已发送打开请求；请查看启动器窗口并选择目标版本".into(),
+                            None => "已发送打开请求；请在启动器中选择目标版本".into(),
                         };
                         children.push(child);
-                        if !message.starts_with("Failed") {
+                        if !failed {
                             index.record_opened(&subject_id)?;
                             let _ = events.send(Event::Dirty);
                         }
@@ -1368,13 +1376,26 @@ fn selected_launcher<'a>(ui: &AppWindow, state: &'a UiState) -> Option<&'a Launc
         .get(ui.get_launcher_index().max(0) as usize)
 }
 
+fn update_issues(ui: &AppWindow, state: &UiState) {
+    ui.set_issue_count(state.diagnostics.len() as i32);
+    ui.set_diagnostics(
+        state
+            .diagnostics
+            .iter()
+            .map(|message| i18n::translate(message, ui.get_english()))
+            .collect::<Vec<_>>()
+            .join("\n\n")
+            .into(),
+    );
+}
+
 fn launch_info(ui: &AppWindow, state: &UiState) {
     ui.set_can_launch_script(false);
     let Some(item) = &state.selected else {
         return;
     };
     let Some(installation) = selected_launcher(ui, state) else {
-        ui.set_launch_status("LauncherNotConfigured".into());
+        ui.set_launch_status(i18n::translate("未关联启动器", ui.get_english()).into());
         ui.set_launch_hint(
             i18n::translate(
                 "在设置中添加 PCL2 / PCL CE / HMCL 安装文件",
@@ -1408,11 +1429,16 @@ fn launch_info(ui: &AppWindow, state: &UiState) {
         same_root && valid_mapping && item.available && mapping.is_some_and(|m| m.script.is_some()),
     );
     ui.set_launch_status(
-        if !same_root || !valid_mapping {
-            "Unmapped"
-        } else {
-            "OpenOnly"
-        }
+        i18n::translate(
+            if !same_root || !valid_mapping {
+                "需要重新关联"
+            } else if ui.get_can_launch_script() {
+                "已关联启动脚本"
+            } else {
+                "可打开启动器"
+            },
+            ui.get_english(),
+        )
         .into(),
     );
     ui.set_launch_hint(
@@ -1426,7 +1452,7 @@ fn launch_info(ui: &AppWindow, state: &UiState) {
             "共享目录需手动关联目标版本；在设置关联中可绑定该版本的启动脚本。".to_string()
         } else {
             format!(
-                "打开 {} 后手动选择：{}\n根目录：{}\n如需直接启动，请在设置关联中绑定该版本的启动脚本。",
+                "打开 {} 后选择：{}\n根目录：{}\n直接启动需要该版本的脚本，可在“设置关联”中自动识别或手动选择。",
                 installation.kind.label(),
                 target,
                 display_path(&installation.root)
@@ -1453,6 +1479,7 @@ fn apply_settings(ui: &AppWindow, state: &mut UiState, settings: Settings) {
             .collect(),
     ));
     ui.set_status(i18n::translate(&state.raw_status, ui.get_english()).into());
+    update_issues(ui, state);
     ui.set_operation_history(i18n::translate(&state.raw_history, ui.get_english()).into());
     if let Some(plan) = &state.operation_plan {
         ui.set_operation_preview(plan.preview_localized(ui.get_english()).into());
@@ -1495,7 +1522,7 @@ fn apply_settings(ui: &AppWindow, state: &mut UiState, settings: Settings) {
                     id: l.id.clone().into(),
                     label: i18n::translate(
                         &format!(
-                            "{}{} · OpenOnly",
+                            "{}{}",
                             l.kind.label(),
                             if state.settings.default_launcher.as_ref() == Some(&l.id) {
                                 if ui.get_english() {
@@ -1872,8 +1899,16 @@ pub fn run() -> Result<()> {
         )
     });
     let state = Rc::new(RefCell::new(UiState::default()));
-    state.borrow_mut().diagnostics.push("阶段 3：安全文件管理。PCL2 / PCL CE / HMCL 当前仅具备 OpenLauncher；指定实例直接启动尚未验证。\n大小口径：逻辑字节；内容与世界、游戏目录大小不可叠加。\n文件操作先预览再确认，不覆盖；移动先复制校验，再将原件移入回收站。\n收藏与标签只写入本程序数据库；重命名和移动后同步注释。\n数据包必须包含根级 pack.mcmeta 和 data/；不跟随链接、junction 或重解析点。".into());
     let weak = ui.as_weak();
+    let issues_ui = weak.clone();
+    let issues_state = state.clone();
+    ui.on_clear_issues(move || {
+        if let Some(ui) = issues_ui.upgrade() {
+            let mut state = issues_state.borrow_mut();
+            state.diagnostics.clear();
+            update_issues(&ui, &state);
+        }
+    });
     let appearance_sender = sender.clone();
     let appearance_ui = weak.clone();
     let appearance_state = state.clone();
@@ -2890,7 +2925,13 @@ pub fn run() -> Result<()> {
                 Event::Progress(progress,message) => { ui.set_progress(progress); ui.set_status(i18n::translate(&message,ui.get_english()).into());state.raw_status=message; }
                 Event::Scanning(scanning) => { ui.set_scanning(scanning); if !scanning { ui.set_progress(0.0); } else {poll_icons.borrow_mut().loaded.retain(|_,icon|icon.is_some());} }
                 Event::Dirty => { if state.query_due.is_none() { state.query_due = Some(Instant::now() + Duration::from_millis(100)); } }
-                Event::Warning(warning) => { state.diagnostics.push(warning); if state.diagnostics.len() > 100 { state.diagnostics.remove(1); } }
+                Event::Warning(warning) => {
+                    if !state.diagnostics.contains(&warning) {
+                        state.diagnostics.push(warning);
+                        if state.diagnostics.len() > 100 { state.diagnostics.remove(0); }
+                        update_issues(&ui, &state);
+                    }
+                }
                 Event::Detail(item, icon) => { let item = *item; if item.id == ui.get_selected_id().as_str() && state.selected.as_ref().is_none_or(|current|icon_key(current)==icon_key(&item)) {
                     state.selected = Some(item.clone()); detail(&ui,&state,&item);
                     ui.set_has_icon(icon.is_some());
@@ -2924,7 +2965,7 @@ pub fn run() -> Result<()> {
                     }
                 }
                 Event::OperationPrepared(plan, signature) => {if ui.get_operation_visible() && operation_signature(&ui,&state.operation_ids)==signature {ui.set_operation_preview(plan.preview_localized(ui.get_english()).into());ui.set_operation_ready(true);state.operation_plan=Some(*plan);ui.set_status(i18n::translate("预览已生成；核对真实路径并勾选确认后才能执行",ui.get_english()).into());}}
-                Event::OperationError(message) => {ui.set_operation_ready(false);state.operation_plan=None;ui.set_operation_preview(i18n::translate(&message,ui.get_english()).into());ui.set_status(i18n::translate(&message,ui.get_english()).into());state.diagnostics.push(message);}
+                Event::OperationError(message) => {ui.set_operation_ready(false);state.operation_plan=None;ui.set_operation_preview(i18n::translate(&message,ui.get_english()).into());ui.set_status(i18n::translate(&message,ui.get_english()).into());state.raw_status=message;}
                 Event::OperationHistory(history) => {ui.set_operation_history(i18n::translate(&history,ui.get_english()).into());state.raw_history=history;},
                 Event::OperationBrowse(field,path) => {if field==1{ui.set_operation_backup(display_path(&path).into());}else{ui.set_operation_parent(display_path(&path).into());}}
                 Event::OperationFinished => {ui.set_operation_visible(false);ui.set_operation_ready(false);state.operation_plan=None;state.query_due=Some(Instant::now());},
@@ -2933,7 +2974,6 @@ pub fn run() -> Result<()> {
         { let mut cache=poll_icons.borrow_mut(); while let Some(request)=cache.deferred.pop_front() {
             match icon_sender.try_send(request) {Ok(())=>(),Err(mpsc::TrySendError::Full(request))=>{cache.deferred.push_front(request);break;},Err(mpsc::TrySendError::Disconnected(request))=>{cache.pending.remove(&request.key);} }
         } }
-        ui.set_diagnostics(state.diagnostics.iter().map(|d|i18n::translate(d,ui.get_english())).collect::<Vec<_>>().join("\n\n").into());
         if state.close_requested && !ui.get_scanning(){let _=slint::quit_event_loop();return;}
         if state.query_due.is_some_and(|due| Instant::now() >= due) { queue_query(&ui,&mut state,&poll_sender); }
     });

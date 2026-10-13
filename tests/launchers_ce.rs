@@ -87,7 +87,7 @@ fn pcl_ce_mapping_rejects_other_installations_roots_and_same_named_versions() {
     assert_eq!(fallback.launcher_id, "ce-a-alternative");
     assert_eq!(fallback.game_dir, mapping.game_dir);
     let gated = launcher::launch_instance(&ce_a, &mapping, &version_a).unwrap_err();
-    assert!(gated.to_string().contains("OpenOnly"));
+    assert!(gated.to_string().contains("请在启动器中选择"));
     assert!(
         !PclCeAdapter
             .capabilities()

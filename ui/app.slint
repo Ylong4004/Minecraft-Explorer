@@ -126,7 +126,7 @@ export component AppWindow inherits Window {
     in property <string> detail-text;
     in property <image> detail-icon;
     in property <bool> has-icon;
-    in property <string> launch-status: "LauncherNotConfigured";
+    in property <string> launch-status: I18n.text("未关联启动器");
     in property <string> launch-hint;
     in property <bool> can-open;
     in property <bool> can-launch-script;
@@ -153,6 +153,9 @@ export component AppWindow inherits Window {
     in property <[string]> root-labels;
     in-out property <int> custom-root-index: 0;
     in property <string> diagnostics;
+    in property <int> issue-count;
+    in-out property <bool> issues-visible;
+    callback clear-issues();
     in-out property <bool> detail-favorite;
     in-out property <string> detail-tags;
     in-out property <bool> favorite-only;
@@ -229,8 +232,8 @@ export component AppWindow inherits Window {
         key-pressed(event) => {
             if (event.text == Key.F5) { root.refresh(); return accept; }
             if (event.modifiers.control && (event.text == "f" || event.text == "F" || event.text == "k" || event.text == "K")) { search-field.focus(); return accept; }
-            if (event.text == Key.Escape) { if root.operation-visible { root.dismiss-operation(); } root.mapping-visible = false; root.editor-visible = false; root.about-visible = false; return accept; }
-            if !root.operation-visible && !root.mapping-visible && !root.editor-visible && !root.about-visible && ((root.page >= 0 && root.page <= 5) || root.page >= 9) {
+            if (event.text == Key.Escape) { if root.operation-visible { root.dismiss-operation(); } root.mapping-visible = false; root.editor-visible = false; root.about-visible = false; root.issues-visible = false; return accept; }
+            if !root.operation-visible && !root.mapping-visible && !root.editor-visible && !root.about-visible && !root.issues-visible && ((root.page >= 0 && root.page <= 5) || root.page >= 9) {
                 if (event.text == Key.F2) { root.keyboard-action(2); return accept; }
                 if (event.text == Key.Delete) { root.keyboard-action(6); return accept; }
                 if (event.text == Key.Return) { root.keyboard-action(0); return accept; }
@@ -263,7 +266,6 @@ export component AppWindow inherits Window {
                         }
                         }
                         Label { text: I18n.text("空间与内容管理"); font-size: 12px; height: 22px; }
-                        Label { text: "Made with Slint"; font-size: 11px; height: 22px; }
                     }
                 }
                 VerticalLayout {
@@ -483,9 +485,6 @@ export component AppWindow inherits Window {
                             ComboBox { model: root.launcher-labels; current-index <=> root.launcher-index; }
                             Button { text: I18n.text("设为全局默认启动器"); clicked => { root.set-global-default(); } }
                         }
-                        Label { text: I18n.text("扫描诊断 / 能力说明"); }
-                        diagnostics-scroll := ScrollView { height: 160px; content-width: self.visible-width; Text { width: diagnostics-scroll.visible-width; text: root.diagnostics; color: Theme.shade(#aebbc9, #344557); wrap: word-wrap; font-size: 12px; horizontal-alignment: left; vertical-alignment: top; } }
-                        Label { text: I18n.text("Made with Slint · https://slint.dev · 文件操作须预览并确认"); font-size: 11px; }
                         }
                     }
                 }
@@ -494,7 +493,10 @@ export component AppWindow inherits Window {
                 Rectangle { width: parent.width * root.progress; height: 3px; background: #63d8a0; }
             }
             Rectangle { height: 34px; background: Theme.shade(#181f2a, #e4eaf2);
-                Label { x: 16px; width: parent.width - 32px; height: parent.height; vertical-alignment: center; text: root.status; }
+                HorizontalLayout { padding-left: 16px; padding-right: 16px; spacing: 10px;
+                    Label { horizontal-stretch: 1; vertical-alignment: center; text: root.status; }
+                    if root.issue-count > 0 : Button { text: I18n.text("查看问题") + " (" + root.issue-count + ")"; clicked => { root.issues-visible = true; } }
+                }
             }
         }
     }
@@ -589,12 +591,29 @@ export component AppWindow inherits Window {
         TouchArea { }
         Rectangle { width: 440px; height: 390px; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; background: Theme.shade(#202b3a, #f8fafc); border-radius: 9px;
             VerticalLayout { padding: 22px; spacing: 12px;
-                Text { text: "Minecraft Explorer 1.0.1"; color: Theme.shade(#ffffff, #182532); font-size: 21px; }
+                Text { text: "Minecraft Explorer 1.0.2"; color: Theme.shade(#ffffff, #182532); font-size: 21px; }
                 Label { text: I18n.text("本地内容与安全文件管理"); }
                 AboutSlint { }
                 Label { text: I18n.text("许可原文已嵌入程序；导出后在资源管理器中双击查看。"); wrap: word-wrap; }
                 Button { text: I18n.text("导出第三方许可"); clicked => { root.export-licenses(); } }
                 Button { text: I18n.text("关闭"); clicked => { root.about-visible = false; } }
+            }
+        }
+    }
+    if root.issues-visible : Rectangle {
+        background: #0009;
+        TouchArea { }
+        Rectangle { width: parent.width - 120px; height: parent.height - 100px; x: 60px; y: 50px; background: Theme.shade(#202b3a, #f8fafc); border-radius: 9px;
+            VerticalLayout { padding: 22px; spacing: 12px;
+                Text { text: I18n.text("扫描与监控问题"); color: Theme.shade(#ffffff, #182532); font-size: 21px; }
+                Label { text: I18n.text("以下问题可能影响结果完整性。修正后可刷新重试；这里只保留本次运行最近 100 项。"); wrap: word-wrap; }
+                issues-scroll := ScrollView { vertical-stretch: 1; content-width: self.visible-width;
+                    Text { x: 0px; y: 0px; width: issues-scroll.visible-width; text: root.diagnostics; color: Theme.shade(#d0d9e4, #344557); wrap: word-wrap; vertical-alignment: top; }
+                }
+                HorizontalLayout {
+                    Button { text: I18n.text("清空"); clicked => { root.clear-issues(); root.issues-visible = false; } }
+                    Button { text: I18n.text("关闭"); clicked => { root.issues-visible = false; } }
+                }
             }
         }
     }

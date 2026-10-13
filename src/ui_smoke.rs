@@ -71,7 +71,7 @@ pub fn start(ui: &AppWindow) -> Option<Timer> {
                 assert_eq!(ui.get_detail_title().as_str(),if real {"Roguelike Bio"} else {"冒险地图"});
                 assert!(ui.get_detail_text().contains(if real {"Roguelike Bio-肉鸽生化[导入包] v1.0"} else {"fabric-custom"}));
                 assert_eq!(ui.get_can_open(),real);
-                if real { assert_eq!(ui.get_launch_status().as_str(),"OpenOnly"); assert_eq!(ui.get_target_name().as_str(),"Roguelike Bio-肉鸽生化[导入包] v1.0"); }
+                if real { assert_eq!(ui.get_launch_status().as_str(),"可打开启动器"); assert_eq!(ui.get_target_name().as_str(),"Roguelike Bio-肉鸽生化[导入包] v1.0"); }
                 snapshot(&ui,&output,"world-details.png");
                 click(&ui,58.,483.);
                 assert_eq!(ui.get_page(),8,"settings navigation did not respond");

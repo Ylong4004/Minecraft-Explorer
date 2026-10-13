@@ -48,12 +48,18 @@ pub(crate) fn snapshot(ui: &AppWindow, output: &Path, name: &str) -> Result<()> 
         .window()
         .take_snapshot()
         .context("native renderer snapshot")?;
-    image::save_buffer(
-        output.join(name),
+    // 验收截图使用快速无损编码，避免测试自身压缩 PNG 阻塞界面响应探针。
+    let file = std::io::BufWriter::new(fs::File::create(output.join(name))?);
+    image::ImageEncoder::write_image(
+        image::codecs::png::PngEncoder::new_with_quality(
+            file,
+            image::codecs::png::CompressionType::Fast,
+            image::codecs::png::FilterType::Sub,
+        ),
         pixels.as_bytes(),
         pixels.width(),
         pixels.height(),
-        image::ColorType::Rgba8,
+        image::ExtendedColorType::Rgba8,
     )?;
     Ok(())
 }
@@ -574,6 +580,8 @@ impl Run {
                 if ui.get_mapping_visible() || !ui.get_can_launch_script() {
                     return Ok(false);
                 }
+                ensure!(ui.get_launch_status() == "已关联启动脚本");
+                ensure!(ui.get_status().contains("可使用“启动关联脚本”"));
                 ui.invoke_begin_mapping();
                 ensure!(
                     ui.get_mapping_script().contains("launch-scripts"),

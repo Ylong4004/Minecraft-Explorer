@@ -69,6 +69,30 @@ fn key(ui: &AppWindow, text: slint::SharedString) {
         .dispatch_event(WindowEvent::KeyReleased { text });
 }
 
+fn native_open_issues(ui: &AppWindow) -> Result<()> {
+    use slint::{LogicalPosition, platform::PointerEventButton};
+    ensure!(ui.get_issue_count() > 0 && !ui.get_issues_visible());
+    ui.window().take_snapshot().map_err(anyhow::Error::from)?;
+    let size = ui.window().size();
+    let scale = ui.window().scale_factor();
+    let position = LogicalPosition::new(
+        size.width as f32 / scale - 80.,
+        size.height as f32 / scale - 17.,
+    );
+    ui.window()
+        .dispatch_event(WindowEvent::PointerMoved { position });
+    ui.window().dispatch_event(WindowEvent::PointerPressed {
+        position,
+        button: PointerEventButton::Left,
+    });
+    ui.window().dispatch_event(WindowEvent::PointerReleased {
+        position,
+        button: PointerEventButton::Left,
+    });
+    ensure!(ui.get_issues_visible(), "底部问题按钮未打开弹窗");
+    Ok(())
+}
+
 fn native_choose_appearance(ui: &AppWindow, english: bool, light: bool) -> Result<()> {
     use slint::{LogicalPosition, platform::PointerEventButton};
     ensure!(ui.get_page() == 8);
@@ -151,6 +175,7 @@ impl Run {
             return Ok(false);
         }
         if self.verify {
+            ensure!(ui.get_issue_count() == 0 && ui.get_diagnostics().is_empty());
             ensure!(ui.get_english() && ui.get_light_theme());
             ensure!(
                 Index::open(&self.fixture.cache.join("index.db"))?
@@ -379,6 +404,16 @@ impl Run {
             }
             9 => {
                 snapshot(ui, &self.output, "settings-light-en.png")?;
+                ensure!(!ui.get_diagnostics().contains("阶段"));
+                ensure!(
+                    ui.get_diagnostics()
+                        .contains("Cannot verify data pack structure")
+                );
+                ensure!(ui.get_diagnostics().contains("损坏数据包.zip"));
+                native_open_issues(ui)?;
+                snapshot(ui, &self.output, "issues-light-en.png")?;
+                key(ui, slint::platform::Key::Escape.into());
+                ensure!(!ui.get_issues_visible());
                 native_choose_appearance(ui, false, false)?;
                 native_choose_appearance(ui, true, true)?;
                 native_choose_appearance(ui, false, false)?;
@@ -389,6 +424,16 @@ impl Run {
                     return Ok(false);
                 }
                 snapshot(ui, &self.output, "settings-dark-zh.png")?;
+                native_open_issues(ui)?;
+                ensure!(ui.get_diagnostics().contains("数据包结构无法验证"));
+                snapshot(ui, &self.output, "issues-dark-zh.png")?;
+                ui.invoke_clear_issues();
+                ensure!(ui.get_issue_count() == 0 && ui.get_diagnostics().is_empty());
+                key(ui, slint::platform::Key::Escape.into());
+                self.checks.push(
+                    "设置页无开发说明；真实按钮查看扫描问题、双语即时切换、Esc 关闭与清空提示"
+                        .into(),
+                );
                 ensure!(self.fixture.root.join("late.bin").exists());
                 self.checks
                     .push("切回中文深色，文件名和路径保持原样".into());

@@ -386,10 +386,10 @@ pub fn launch_instance(
         .contains(&Capability::LaunchInstance)
     {
         bail!(
-            "OpenOnly：尚未验证外部指定实例启动接口。请打开启动器后手动选择 {}（{}）。也可手动选择关联同一根目录的其他启动器安装。",
+            "暂不支持通过此启动器直接选择版本。请在启动器中选择 {}（{}），或关联该版本的启动脚本。",
             mapping.version_id,
             display_path(&mapping.root)
         );
     }
-    bail!("当前适配器没有已验证的直接启动实现")
+    bail!("无法通过此启动器直接启动版本，请关联该版本的启动脚本")
 }

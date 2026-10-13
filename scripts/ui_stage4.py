@@ -36,6 +36,9 @@ custom=ROOT/"versions"/"独立实例"
 (custom/"saves"/"独立世界").mkdir(parents=True)
 (custom/"独立实例.json").write_text('{"id":"isolated-fixture"}',encoding="utf-8")
 (custom/"saves"/"独立世界"/"level.dat").write_bytes(gzip.compress(nbt,mtime=0))
+bad_pack=ROOT/"saves"/"世界 0000"/"datapacks"/"损坏数据包.zip"
+bad_pack.parent.mkdir(parents=True)
+bad_pack.write_bytes(b"not a zip archive")
 original={str(p.relative_to(ROOT)):hashlib.sha256(p.read_bytes()).hexdigest() for p in ROOT.rglob("*") if p.is_file()}
 total=sum(p.stat().st_size for p in ROOT.rglob("*") if p.is_file())
 extra_root=RUN/"自动分析新增目录";extra_root.mkdir();(extra_root/"payload.bin").write_bytes(bytes(73))

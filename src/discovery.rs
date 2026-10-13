@@ -200,8 +200,7 @@ pub fn discover(settings: &Settings, cancel: &AtomicBool) -> Discovery {
                         });
                         if independent {
                             version.game_dir = Some(dir.clone());
-                            version.ownership =
-                                "独立内容目录（由现存文件确认；启动器隔离设置未验证）".into();
+                            version.ownership = "独立内容目录".into();
                             games.push((dir.clone(), format!("独立目录 · {}", version.name)));
                         } else {
                             version.ownership = "游戏目录未确认；可手动关联".into();

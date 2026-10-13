@@ -1,4 +1,4 @@
-# Minecraft Explorer 1.0.1
+# Minecraft Explorer 1.0.2
 
 Download the single `MinecraftExplorer-1.0-win-x64.exe` from the [Fimel project page](https://studiofimel.com/#/works/minecraft-explorer). [Source code and issues](https://github.com/Ylong4004/Minecraft-Explorer). The app embeds its icons, project MIT license and third-party license texts. Settings → About → Export third-party licenses saves them to the app data directory for offline reading.
 
@@ -16,7 +16,7 @@ File operations include rename, verified copy/move, directory backup/restore and
 
 The context menu offers file actions and launcher access. F2 opens Rename, Delete opens Recycle, Enter reveals the selection, arrow keys select rows, Ctrl+A selects the list, Ctrl+Shift+A clears it, Ctrl+C copies the path, Ctrl+B opens Backup, Ctrl+F/K focuses Search, F5 refreshes and Esc closes dialogs. Text fields keep their editing shortcuts.
 
-PCL2, PCL CE and HMCL support **OpenOnly** through their native adapters. You can separately link a BAT / CMD for a specific version and run that script. Opening a launcher or successfully running a script does not confirm a game launch. Windows UAC handles installations configured to run as administrator. The app does not read login tokens or change launcher settings.
+PCL2, PCL CE and HMCL can be opened from the app. To launch a specific version directly, link its BAT / CMD script. Opening a launcher or successfully running a script does not confirm a game launch. Windows UAC handles installations configured to run as administrator. The app does not read login tokens or change launcher settings.
 
 ## First use
 
@@ -37,6 +37,8 @@ Choose a root or game directory in Space analysis and click Reanalyze after the 
 Size scanning reuses completed directory subtree totals across instances, worlds and unpacked packs within one task. Monitoring automatically recalculates affected instance totals. This is ordinary-permission directory enumeration, not direct NTFS MFT access, so speed is not guaranteed to match elevated WinDirStat scans.
 
 App settings and indexes are stored in `%LOCALAPPDATA%\MinecraftExplorer\index.db`, or the directory specified by `MINECRAFT_EXPLORER_DATA`. Operation history is stored beside it under `operations`. Scanning, previews, analysis and duplicate detection do not write game files.
+
+When scanning or monitoring encounters a problem, **View issues** appears in the status bar. Open it to see the affected paths and causes, then fix the problem and refresh. Duplicate messages are combined and only the latest 100 issues from this session are retained. Clear removes the messages without changing files. File-operation errors remain in the operation dialog, and recovery records remain in Cleanup & backup.
 
 See [testing](TESTING.md), [architecture](ARCHITECTURE.md), [launcher research](LAUNCHER_RESEARCH.md) and [licenses](THIRD_PARTY.md). The app's original source is [MIT licensed](../LICENSE); distribution includes Slint attribution and upstream notices.
 

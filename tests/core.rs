@@ -533,7 +533,7 @@ fn mapping_cross_root_and_missing_target_are_rejected() {
         launcher::launch_instance(&pcl, &mapping, &version)
             .unwrap_err()
             .to_string()
-            .contains("OpenOnly")
+            .contains("请在启动器中选择")
     );
     mapping.root = fixture.path().join("other");
     assert!(launcher::validate_mapping(&mapping, &pcl, &version).is_err());
